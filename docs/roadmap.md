@@ -408,8 +408,9 @@ capability.
   source-version handoff, through current enabled bindings in both host modes. Terminal
   callback snapshots repair failed completion deliveries after raw-run cleanup.
   Source-owned history retention preserves recent, current, active and legacy results
-  through bounded scans. Finish terminal job/run cleanup, quota recovery and
-  cancellation/recovery verification,
+  through bounded scans. Terminal job/run cleanup now preserves durable history and
+  rotates past blocked records; history retention repairs quota pressure. Finish
+  deployed cancellation/recovery verification,
   then activate the executable release. Task and monitor mutations now share guarded
   SDK actions with Memory; verify the deployed paired-host browser lifecycle and
   the compiled defaults before removing transitional built-in handlers.

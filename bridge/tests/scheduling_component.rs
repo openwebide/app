@@ -574,6 +574,16 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
         // Seed a completed retention scan, then let the real background actor prune
         // the two newly completed entries while preserving the task's latest failure.
         let mut seed = services.clone();
+        let raw: Value = serde_json::from_str(&seed.request("runs",
+            &json!({"action":"submit","key":format!("task:{}:1:100", failed_task.id),
+                "prompt":"Old accepted occurrence","target":{"kind":"new","title":"Old occurrence"}}).to_string()).unwrap()).unwrap();
+        let raw = &raw["runs"][0];
+        let raw_id = raw["id"].as_i64().unwrap();
+        seed.request(
+            "runs",
+            &json!({"action":"cancel","id":raw_id,"revision":raw["revision"]}).to_string(),
+        )
+        .unwrap();
         let mut retained = Vec::new();
         for index in 0..130 {
             let value: Value = serde_json::from_str(&seed.request("collections",
@@ -661,6 +671,39 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
         let newest: Value = serde_json::from_str(&readback.request("collections",
             &json!({"collection":"task_runs","operation":{"action":"read","id":retained[129]}}).to_string()).unwrap()).unwrap();
         assert_eq!(newest["records"][0]["value"]["key"], "retention:129");
+        let runs: Value = serde_json::from_str(
+            &readback
+                .request("runs", &json!({"action":"list"}).to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            runs["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|run| run["id"] != raw_id)
+        );
+        let saved: Value = serde_json::from_str(&readback.request("collections",
+            &json!({"collection":"task_runs","operation":{"action":"list","after":retained[129]}}).to_string()).unwrap()).unwrap();
+        let saved = saved["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["value"]["run_id"] == raw_id)
+            .unwrap();
+        assert_eq!(saved["value"]["snapshot"]["status"], "cancelled");
+        let jobs: Value = serde_json::from_str(
+            &readback
+                .request("jobs", &json!({"action":"list"}).to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(jobs["jobs"].as_array().unwrap().iter().all(|job| {
+            job["key"]
+                .as_str()
+                .is_none_or(|key| !key.starts_with(&format!("task:{task}:")))
+        }));
         block_on(store.finish_plugin_job(
             "host",
             delivery.job.id,
