@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 52;
+pub const SCHEMA_VERSION: i64 = 53;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -600,6 +600,24 @@ async fn apply_step<D: Db>(
             // releases the reserved event in the same transaction as the run status.
             db.execute("CREATE TRIGGER IF NOT EXISTS complete_plugin_run_event AFTER UPDATE OF state ON plugin_runs WHEN NEW.state IN ('completed','failed','cancelled','interrupted') AND OLD.state NOT IN ('completed','failed','cancelled','interrupted') BEGIN UPDATE plugin_jobs SET state='pending',revision=revision+1,payload=json_object('run',json_object('id',NEW.id,'revision',NEW.revision,'key',NEW.run_key,'session_id',NEW.session_id,'state',NEW.state,'created_at',NEW.created_at,'detail',NEW.detail,'message_id',NEW.message_id,'permission_id',NEW.permission_id),'data',json(payload)) WHERE id=NEW.completion_job AND state='waiting'; END", &[]).await?;
             db.execute("CREATE TRIGGER IF NOT EXISTS delete_plugin_run_event AFTER DELETE ON plugin_runs BEGIN UPDATE plugin_jobs SET state='cancelled',revision=revision+1 WHERE id=OLD.completion_job AND state='waiting'; END", &[]).await?;
+            Ok(())
+        }
+        53 => {
+            if db
+                .execute(
+                    "SELECT 1 FROM pragma_table_info('plugin_jobs') WHERE name='scope'",
+                    &[],
+                )
+                .await?
+                .rows
+                .is_empty()
+            {
+                db.execute(
+                    "ALTER TABLE plugin_jobs ADD COLUMN scope TEXT NOT NULL DEFAULT 'origin'",
+                    &[],
+                )
+                .await?;
+            }
             Ok(())
         }
         other => Err(StorageError::Db(format!("unknown migration step {other}"))),

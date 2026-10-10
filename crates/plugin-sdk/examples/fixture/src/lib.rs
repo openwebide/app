@@ -3,7 +3,10 @@ struct Fixture;
 impl Plugin for Fixture {
     fn events()->Vec<String> { vec!["job_due".into()] }
     fn event(input:openwebide_plugin_sdk::EventInput)->Result<Outcome,String> {
-        let operation=json!({"collection":"events","operation":{"action":"create","value":{"event":input.name,"payload":input.payload}}});
+        let conversations:Option<serde_json::Value> = if input.payload.get("discover")==Some(&json!(true)) {
+            Some(openwebide_plugin_sdk::collections("conversations",&json!({"action":"list"}))?)
+        } else { None };
+        let operation=json!({"collection":"events","operation":{"action":"create","value":{"event":input.name,"payload":input.payload,"conversations":conversations}}});
         let response:serde_json::Value=openwebide_plugin_sdk::request("records",&operation)?;
         Ok(Outcome {ok:true,content:response.to_string(),summary:"Plugin-owned event".into()})
     }
@@ -30,6 +33,8 @@ impl Plugin for Fixture {
             "fixture_echo" => {
                 let response: serde_json::Value = if let Some(operation) = arguments.get("runs") {
                     openwebide_plugin_sdk::runs(operation)?
+                } else if let Some(operation) = arguments.get("collections") {
+                    openwebide_plugin_sdk::collections(operation["collection"].as_str().ok_or("Missing collection")?,&operation["operation"])?
                 } else if let Some(operation) = arguments.get("jobs") {
                     openwebide_plugin_sdk::jobs(operation)?
                 } else {

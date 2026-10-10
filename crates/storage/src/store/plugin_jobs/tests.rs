@@ -128,6 +128,7 @@ impl Fixture {
     }
     fn scheduled(key: &str) -> JobRequest {
         JobRequest::Schedule {
+            scope: JobScope::Origin,
             key: key.into(),
             due_at: 20,
             expires_at: Some(1000),
@@ -342,6 +343,130 @@ fn jobs_are_owned_idempotent_version_pinned_and_leased_in_both_modes() {
 }
 
 #[test]
+fn project_events_survive_origin_deletion_and_cannot_change_scope_on_retry() {
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let session = f
+                .store
+                .create_session("Origin", None, None, Some(f.project), f.user, 0)
+                .await
+                .unwrap()
+                .id;
+            let server = f
+                .store
+                .insert_connection(&openwebide_core::NewConnection {
+                    name: "Primary".into(),
+                    kind: openwebide_core::ProviderKind::Ollama,
+                    base_url: "http://model.test".into(),
+                    model: Some("server-default".into()),
+                    context_limit: None,
+                })
+                .await
+                .unwrap();
+            let selected = openwebide_core::ModelSelection {
+                server_id: server.id,
+                model: "original-model".into(),
+            };
+            let context = PluginExecutionContext {
+                session_id: Some(session),
+                user_action: false,
+                primary: Some(selected.clone()),
+                ..f.context.clone()
+            };
+            f.store
+                .issue_plugin_context_grant(f.user, &context, &f.prepared, &"e".repeat(32), 1)
+                .await
+                .unwrap();
+            for scope in [JobScope::Origin, JobScope::Project] {
+                let mut command = Fixture::scheduled(scope.as_str());
+                if let JobRequest::Schedule {
+                    scope: lifetime, ..
+                } = &mut command
+                {
+                    *lifetime = scope;
+                }
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        session,
+                        &PluginHostRequest {
+                            grant: "e".repeat(32),
+                            capability: "jobs".into(),
+                            payload: encode(&command).unwrap(),
+                        },
+                        2,
+                    )
+                    .await
+                    .unwrap();
+            }
+            f.store.delete_session(session, f.user).await.unwrap();
+            let mut project = Fixture::scheduled("project");
+            if let JobRequest::Schedule { scope, .. } = &mut project {
+                *scope = JobScope::Project;
+            }
+            assert_eq!(f.request(&project, 3).await.unwrap().jobs.len(), 1);
+            let changed = Fixture::scheduled("project");
+            assert!(f.request(&changed, 3).await.is_err());
+            let events = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"b".repeat(32), 20)
+                .await
+                .unwrap();
+            assert_eq!(events.jobs.len(), 1);
+            let event = &events.jobs[0];
+            assert_eq!(event.job.key, "project");
+            assert_eq!(event.context.session_id, None);
+            assert_eq!(event.context.project_id, Some(f.project));
+            assert_eq!(event.context.primary, Some(selected.clone()));
+            let (_, context) = f
+                .store
+                .issue_plugin_job_grant(
+                    f.user,
+                    &f.prepared.host_id,
+                    event.job.id,
+                    &event.lease,
+                    &"d".repeat(32),
+                    21,
+                )
+                .await
+                .unwrap();
+            assert_eq!(context.session_id, None);
+            assert!(!context.user_action);
+            let mut child = Fixture::scheduled("child");
+            if let JobRequest::Schedule { scope, due_at, .. } = &mut child {
+                *scope = JobScope::Project;
+                *due_at = 40;
+            }
+            let request = PluginHostRequest {
+                grant: "d".repeat(32),
+                capability: "jobs".into(),
+                payload: encode(&child).unwrap(),
+            };
+            f.store
+                .plugin_context_host_request(f.user, &request, 22)
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .plugin_host_request(f.user, session, &request, 22)
+                    .await
+                    .is_err()
+            );
+            let children = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"c".repeat(32), 40)
+                .await
+                .unwrap();
+            assert_eq!(children.jobs.len(), 1);
+            assert_eq!(children.jobs[0].job.key, "child");
+            assert_eq!(children.jobs[0].context.session_id, None);
+            assert_eq!(children.jobs[0].context.primary, Some(selected));
+        }
+    });
+}
+
+#[test]
 fn jobs_stop_future_delivery_and_revoke_cancelled_callback_authority_in_both_modes() {
     block_on(async {
         for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
@@ -355,6 +480,7 @@ fn jobs_stop_future_delivery_and_revoke_cancelled_callback_authority_in_both_mod
             let expired = fixture
                 .request(
                     &JobRequest::Schedule {
+                        scope: JobScope::Origin,
                         key: "expired".into(),
                         due_at: 20,
                         expires_at: Some(21),
@@ -541,6 +667,7 @@ fn job_pages_are_bounded_and_terminal_cleanup_releases_quota() {
             fixture
                 .request(
                     &JobRequest::Schedule {
+                        scope: JobScope::Origin,
                         key: format!("large-{index}"),
                         due_at: 20,
                         expires_at: None,
@@ -660,6 +787,7 @@ fn job_pages_are_bounded_and_terminal_cleanup_releases_quota() {
         fixture
             .request(
                 &JobRequest::Schedule {
+                    scope: JobScope::Origin,
                     key: "new".into(),
                     due_at: 30,
                     expires_at: None,
@@ -914,6 +1042,7 @@ fn chained_jobs_keep_conversation_origin_without_inheriting_chat_or_manual_autho
                 .await
                 .unwrap();
             let child = JobRequest::Schedule {
+                scope: JobScope::Origin,
                 key: "child".into(),
                 due_at: 40,
                 expires_at: None,
@@ -958,6 +1087,7 @@ fn chained_jobs_keep_conversation_origin_without_inheriting_chat_or_manual_autho
                         fixture.user,
                         &PluginHostRequest {
                             payload: encode(&JobRequest::Schedule {
+                                scope: JobScope::Origin,
                                 key: "orphan".into(),
                                 due_at: 50,
                                 expires_at: None,
@@ -980,6 +1110,55 @@ fn chained_jobs_keep_conversation_origin_without_inheriting_chat_or_manual_autho
                     .unwrap()
                     .jobs
                     .is_empty()
+            );
+        }
+    });
+}
+
+#[test]
+fn project_scope_migration_preserves_old_origin_jobs_and_replays_without_changes() {
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let original = f
+                .request(&Fixture::scheduled("old"), 2)
+                .await
+                .unwrap()
+                .jobs
+                .remove(0);
+            f.store
+                .db
+                .execute("ALTER TABLE plugin_jobs DROP COLUMN scope", &[])
+                .await
+                .unwrap();
+            f.store
+                .db
+                .execute("PRAGMA user_version=52", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            assert_eq!(
+                f.request(&Fixture::scheduled("old"), 3).await.unwrap().jobs[0].id,
+                original.id
+            );
+            let mut project = Fixture::scheduled("old");
+            if let JobRequest::Schedule { scope, .. } = &mut project {
+                *scope = JobScope::Project;
+            }
+            assert!(f.request(&project, 3).await.is_err());
+            f.store
+                .db
+                .execute("PRAGMA user_version=52", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            assert_eq!(
+                f.request(&JobRequest::List { after: 0 }, 3)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .len(),
+                1
             );
         }
     });

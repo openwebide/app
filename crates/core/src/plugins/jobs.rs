@@ -9,6 +9,26 @@ pub const MAX_JOB_PAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_JOB_DELIVERY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_JOB_DELIVERIES: usize = 8;
 
+/// Origin-bound events end with their chat; project events retain only project/model scope.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobScope {
+    #[default]
+    Origin,
+    Project,
+}
+impl JobScope {
+    pub fn is_origin(&self) -> bool {
+        *self == Self::Origin
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Origin => "origin",
+            Self::Project => "project",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobRequest {
@@ -20,6 +40,8 @@ pub enum JobRequest {
         id: i64,
     },
     Schedule {
+        #[serde(default, skip_serializing_if = "JobScope::is_origin")]
+        scope: JobScope,
         key: String,
         due_at: i64,
         expires_at: Option<i64>,
@@ -54,6 +76,7 @@ impl JobRequest {
                 expires_at,
                 event,
                 payload,
+                ..
             } => {
                 if key.is_empty()
                     || key.len() > 128

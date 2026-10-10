@@ -344,14 +344,11 @@ impl<D: Db> Store<D> {
                                 .map_err(|error| StorageError::Db(error.to_string()))
                         }
                         "collections" => {
+                            let origin = store
+                                .plugin_job_origin_context(user, &request.grant, &context)
+                                .await?;
                             let result = store
-                                .plugin_collections_in_transaction(
-                                    user,
-                                    context.project_id,
-                                    context.user_action,
-                                    &command,
-                                    now,
-                                )
+                                .plugin_collections_in_transaction(user, &origin, &command, now)
                                 .await?;
                             serde_json::to_string(&result)
                                 .map_err(|error| StorageError::Db(error.to_string()))

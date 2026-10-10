@@ -1,5 +1,6 @@
 //! Schema adapters for app-visible project data. Feature behavior stays in plugins.
 use super::*;
+use openwebide_core::plugins::execution::PluginExecutionContext;
 use openwebide_core::plugins::records::{CollectionResult, Record, RecordOperation, RecordRequest};
 use serde::{Deserialize, Serialize};
 
@@ -35,8 +36,7 @@ impl<D: Db> Store<D> {
     pub(super) async fn plugin_collections_in_transaction(
         &self,
         user: UserId,
-        project: Option<i64>,
-        user_action: bool,
+        context: &PluginExecutionContext,
         request: &RecordRequest,
         now: i64,
     ) -> Result<CollectionResult, StorageError> {
@@ -50,6 +50,13 @@ impl<D: Db> Store<D> {
         request
             .validate_with_limit(limit)
             .map_err(StorageError::InvalidRequest)?;
+        if request.collection == "conversations" {
+            return self
+                .plugin_conversations_in_transaction(user, context, request)
+                .await;
+        }
+        let project = context.project_id;
+        let user_action = context.user_action;
         if request.collection == "skills" {
             return self
                 .plugin_skills_in_transaction(user, project, user_action, request, now)

@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Let executable plugins choose origin-bound or project-scoped durable events, preserving model pins while allowing saved work to outlive its creating chat. Add bounded, read-only conversation metadata through the shared collections SDK; target selection remains in plugin source. Executable Scheduling and deployed defaults remain in progress.
+
 - Deliver declared plugin completion events atomically with terminal raw-run status, including cancellation, preflight failures and interrupted-host recovery. Reserve event capacity on submission, pin the submitting source version, preserve released callbacks during history cleanup and reuse shared leased event delivery. Executable Scheduling and deployed defaults remain in progress.
 
 - Dispatch raw plugin prompts automatically through the shared host runner on server and paired hosts. Renew leases during preparation and execution, release busy claims, retry status acknowledgements and cancel deliveries on lease loss or shutdown. Executable Scheduling remains in progress.

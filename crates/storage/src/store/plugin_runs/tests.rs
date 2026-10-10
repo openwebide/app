@@ -99,7 +99,7 @@ impl Fixture {
             manifest: "Cargo.toml".into(),
             library: "community_runs".into(),
             sdk_version: "0.1.0".into(),
-            capabilities: vec!["runs".into(), "jobs".into()],
+            capabilities: vec!["runs".into(), "jobs".into(), "collections".into()],
         });
         store
             .record_plugin(
@@ -1335,5 +1335,277 @@ fn run_status_acknowledgements_release_busy_claims_and_reject_wrong_identity() {
                 .state,
             RunState::Completed
         );
+    });
+}
+
+#[test]
+fn conversation_discovery_is_owned_bounded_read_only_and_reports_raw_activity_and_model_metadata() {
+    use openwebide_core::plugins::records::CollectionResult;
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let request = |operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":"conversations","operation":operation}).to_string(),
+            };
+            let other_project = f
+                .store
+                .create_project(
+                    &NewProject {
+                        name: "sibling".into(),
+                        mode,
+                        path: Some("sibling".into()),
+                    },
+                    f.user,
+                    0,
+                )
+                .await
+                .unwrap()
+                .id;
+            let sibling = f
+                .store
+                .create_session("Sibling", None, None, Some(other_project), f.user, 0)
+                .await
+                .unwrap()
+                .id;
+            let foreign = f
+                .store
+                .create_session("Foreign", None, None, None, f.other, 0)
+                .await
+                .unwrap()
+                .id;
+            let global = f
+                .store
+                .create_session("Global", None, None, None, f.user, 0)
+                .await
+                .unwrap()
+                .id;
+            let first: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &request(json!({"action":"list"})), 2)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(first.records.len(), 1);
+            assert_eq!(first.records[0].id, f.session);
+            assert_eq!(first.records[0].value["origin"], true);
+            assert_eq!(first.records[0].value["name"], "origin");
+            let revision = first.records[0].revision;
+            assert!(revision > 0);
+            for id in [sibling, foreign, global] {
+                assert!(
+                    f.store
+                        .plugin_host_request(
+                            f.user,
+                            f.session,
+                            &request(json!({"action":"read","id":id})),
+                            2
+                        )
+                        .await
+                        .is_err()
+                );
+            }
+            for operation in [
+                json!({"action":"create","value":{}}),
+                json!({"action":"update","id":f.session,"revision":revision,"value":{}}),
+                json!({"action":"delete","id":f.session,"revision":revision}),
+            ] {
+                assert!(
+                    f.store
+                        .plugin_host_request(f.user, f.session, &request(operation), 2)
+                        .await
+                        .is_err()
+                );
+            }
+            let server = f
+                .store
+                .insert_connection(&NewConnection {
+                    name: "Primary".into(),
+                    kind: ProviderKind::Ollama,
+                    base_url: "http://private-model.test".into(),
+                    model: Some("server-default".into()),
+                    context_limit: None,
+                })
+                .await
+                .unwrap();
+            f.store
+                .set_session_connection(f.session, server.id, f.user)
+                .await
+                .unwrap();
+            f.store
+                .insert_message(f.session, Role::User, "Private conversation text", 10)
+                .await
+                .unwrap();
+            f.store
+                .set_user_setting(
+                    f.user,
+                    &format!("session_model_{}", f.session),
+                    &json!({"connection_id":server.id,"model":"raw-override"}).to_string(),
+                )
+                .await
+                .unwrap();
+            let read = f
+                .store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &request(json!({"action":"read","id":f.session})),
+                    11,
+                )
+                .await
+                .unwrap();
+            assert!(!read.contains("Private conversation text"));
+            assert!(!read.contains("private-model.test"));
+            let read: CollectionResult = serde_json::from_str(&read).unwrap();
+            assert_eq!(read.records[0].updated_at, 10);
+            assert_eq!(read.records[0].value["connection"]["id"], server.id);
+            assert_eq!(
+                read.records[0].value["connection"]["model"],
+                "server-default"
+            );
+            assert_eq!(read.records[0].value["connection"]["enabled"], true);
+            assert_eq!(read.records[0].value["last_activity"], 10);
+            assert_eq!(
+                read.records[0].value["model_override"]["model"],
+                "raw-override"
+            );
+            assert_ne!(read.records[0].revision, revision);
+            let again: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"read","id":f.session})),
+                        11,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(again.records, read.records);
+            for i in 0..35 {
+                f.store
+                    .create_session(
+                        &format!("Conversation {i}"),
+                        None,
+                        None,
+                        Some(f.project),
+                        f.user,
+                        i,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let first: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &request(json!({"action":"list"})), 12)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(first.records.len(), 32);
+            let next = first.next.unwrap();
+            assert_eq!(next, first.records.last().unwrap().id);
+            let second: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"list","after":next})),
+                        12,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(second.records.len(), 4);
+            assert!(second.next.is_none());
+            assert!(second.records.iter().all(|record| record.id > next));
+            let padding = json!({"padding":"x".repeat(61*1024)}).to_string();
+            for record in first.records.iter().chain(&second.records) {
+                f.store
+                    .set_user_setting(f.user, &format!("session_model_{}", record.id), &padding)
+                    .await
+                    .unwrap();
+            }
+            let mut after = 0;
+            let mut seen = Vec::new();
+            loop {
+                let encoded = f
+                    .store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"list","after":after})),
+                        12,
+                    )
+                    .await
+                    .unwrap();
+                assert!(encoded.len() <= 1024 * 1024);
+                let page: CollectionResult = serde_json::from_str(&encoded).unwrap();
+                assert!(page.records.len() < 32);
+                seen.extend(page.records.iter().map(|record| record.id));
+                match page.next {
+                    Some(next) => {
+                        assert!(next > after);
+                        after = next;
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(seen.len(), 36);
+            f.store
+                .set_user_setting(
+                    f.user,
+                    &format!("session_model_{}", f.session),
+                    &json!({"padding":"x".repeat(64*1024)}).to_string(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"read","id":f.session})),
+                        12
+                    )
+                    .await
+                    .is_err()
+            );
+            // A sessionless scope sees only global conversations in this account.
+            f.store
+                .issue_plugin_context_grant(
+                    f.user,
+                    &PluginExecutionContext::default(),
+                    &f.plugin,
+                    &"f".repeat(32),
+                    1,
+                )
+                .await
+                .unwrap();
+            let global: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_context_host_request(
+                        f.user,
+                        &PluginHostRequest {
+                            grant: "f".repeat(32),
+                            capability: "collections".into(),
+                            payload:
+                                json!({"collection":"conversations","operation":{"action":"list"}})
+                                    .to_string(),
+                        },
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(global.records.len(), 1);
+            assert_eq!(global.records[0].value["name"], "Global");
+            assert_eq!(global.records[0].value["origin"], false);
+        }
     });
 }

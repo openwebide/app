@@ -198,7 +198,12 @@ event-only plugin may export no model-facing tools. These callbacks provide the
 execution contract. The `jobs` capability supplies a durable one-shot queue with
 idempotency keys, version snapshots, bounded pages and renewable delivery leases.
 Jobs retain their creating plugin version across updates; disabled or removed
-plugins receive no new claims. Lease-bound callbacks stop after cancellation,
+plugins receive no new claims. `jobs.schedule` defaults to `scope: "origin"`,
+retaining its creating conversation. `scope: "project"` retains the project and
+model context while dropping the conversation anchor, so saved work survives
+origin deletion. In projectless contexts this scope is the account's global
+conversation realm. The scope is immutable under an idempotency key; neither
+choice authorizes a different account, project or execution host. Lease-bound callbacks stop after cancellation,
 completion or lease replacement. Terminal jobs can be deleted to release quota
 and their idempotency keys. The bridge polls for due events and runs them through the shared execution
 workflow, renewing leases during compilation and execution. Delivery is at least
@@ -238,6 +243,17 @@ source version, model and context across updates. Existing event lease/disableme
 rules and at-least-once delivery apply. Callback cancellation suppresses delivery;
 plugins own idempotency and outcome interpretation. Executable Scheduling remains
 unfinished.
+
+The read-only `conversations` collection supports `list` (ascending ID cursor,
+32 records and at most 1 MiB) and scoped `read`. Values expose names, creation and
+last-message activity timestamps, archive/pin/automatic-title flags, raw session
+model overrides and connection model metadata. `origin` identifies the grant's
+retained originating conversation; project-scoped events have no origin. Only
+owned conversations in the grant's project (or its global realm) appear, and
+message contents and connection credentials are omitted. Revisions are opaque
+positive metadata-content tokens; `updated_at` denotes conversation activity.
+All mutations are rejected. Plugin code decides how to rank/filter these records
+or select a target; the host does not provide a "latest conversation" policy.
 
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.

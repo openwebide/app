@@ -1328,10 +1328,20 @@ mod rust_plugin_tests {
         )
         .await
         .unwrap();
+        let conversations = executor.execute(&openwebide_core::ToolCall {
+            id:"discover".into(),name:"fixture_echo".into(),
+            arguments:serde_json::json!({"collections":{"collection":"conversations","operation":{"action":"list"}}}).to_string(),
+        }).await;
+        assert!(conversations.ok, "{}", conversations.content);
+        let metadata: openwebide_core::plugins::records::CollectionResult =
+            serde_json::from_str(&conversations.content).unwrap();
+        assert_eq!(metadata.records.len(), 1);
+        assert_eq!(metadata.records[0].id, session);
+        assert_eq!(metadata.records[0].value["origin"], true);
         // Public SDK code schedules a real durable event; delivery uses the same executor.
         let scheduled = executor.execute(&openwebide_core::ToolCall {
             id:"schedule".into(), name:"fixture_echo".into(),
-            arguments:serde_json::json!({"jobs":{"action":"schedule","key":"event-one","due_at":20,"expires_at":null,"event":"job_due","payload":{"text":"durable plugin event"}}}).to_string(),
+            arguments:serde_json::json!({"jobs":{"action":"schedule","key":"event-one","scope":"project","due_at":20,"expires_at":null,"event":"job_due","payload":{"text":"durable plugin event","discover":true}}}).to_string(),
         }).await;
         assert!(scheduled.ok, "{}", scheduled.content);
         let queued: openwebide_core::plugins::jobs::JobResult =
@@ -1343,6 +1353,7 @@ mod rust_plugin_tests {
             .jobs
             .remove(0);
         assert_eq!(delivery.job.id, queued.jobs[0].id);
+        assert_eq!(delivery.context.session_id, None);
         openwebide_agent::plugins::jobs::deliver(
             &DatabaseHost {
                 store: store.clone(),
@@ -1381,6 +1392,17 @@ mod rust_plugin_tests {
         assert!(events.ok, "{}", events.content);
         assert!(events.content.contains("durable plugin event"));
         assert!(events.content.contains("raw completion callback"));
+        let effects: serde_json::Value = serde_json::from_str(&events.content).unwrap();
+        let project_event = effects["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["value"]["payload"]["discover"] == true)
+            .unwrap();
+        assert_eq!(
+            project_event["value"]["conversations"]["records"][0]["value"]["origin"],
+            false
+        );
         let grant = format!("{:032x}", queued.jobs[0].id);
         let callback = execution::PluginHostRequest {
             grant,
@@ -1402,7 +1424,7 @@ mod rust_plugin_tests {
             "schemaVersion":1,"publisher":"example","name":"fixture","version":"0.1.0",
             "displayName":"Fixture","description":"SDK adapter contract","license":"MIT",
             "compatibility":{"pluginApi":3},
-            "executable":{"manifest":"Cargo.toml","library":"sdk_fixture","sdkVersion":"0.1.0","capabilities":["records","jobs","runs"]},
+            "executable":{"manifest":"Cargo.toml","library":"sdk_fixture","sdkVersion":"0.1.0","capabilities":["records","jobs","runs","collections"]},
             "contributions":{"skills":[],"events":["job_due"],"tools":[{"name":"fixture_echo","description":"Exercise the public host contract.","parameters":{"type":"object","properties":{}},"requires_approval":false}]}
         })).unwrap();
         let cargo = include_str!("../../crates/plugin-sdk/examples/fixture/Cargo.toml")

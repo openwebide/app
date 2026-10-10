@@ -108,6 +108,7 @@ impl<D: Db> Store<D> {
         let mut id = None;
         match request {
             JobRequest::Schedule {
+                scope: lifetime,
                 key,
                 due_at,
                 expires_at,
@@ -124,7 +125,7 @@ impl<D: Db> Store<D> {
                 }
                 let mut params = scope.clone();
                 params.push(DbValue::Text(key.clone()));
-                let existing = self.db.execute(&format!("SELECT {COLUMNS},prepared FROM plugin_jobs WHERE user_id=? AND project_scope=? AND plugin=? AND job_key=?"), &params).await?;
+                let existing = self.db.execute(&format!("SELECT {COLUMNS},prepared,scope FROM plugin_jobs WHERE user_id=? AND project_scope=? AND plugin=? AND job_key=?"), &params).await?;
                 if let Some(row) = existing.rows.first() {
                     let existing_job = job(row)?;
                     let pinned: PreparedPlugin = decode(row.get_text(10)?)?;
@@ -135,6 +136,7 @@ impl<D: Db> Store<D> {
                         || pinned.source != plugin.source
                         || pinned.manifest != plugin.manifest
                         || pinned.digest != plugin.digest
+                        || row.get_text(11)? != lifetime.as_str()
                     {
                         return Err(StorageError::Conflict(
                             "Job key already refers to another delivery".into(),
@@ -156,16 +158,21 @@ impl<D: Db> Store<D> {
                         "Plugin job queue is full".into(),
                     ));
                 }
+                let mut stored_context = context.clone();
+                if *lifetime == JobScope::Project {
+                    stored_context.session_id = None;
+                }
                 params.extend([
                     DbValue::Int(*due_at),
                     expires_at.map_or(DbValue::Null, DbValue::Int),
                     DbValue::Text(event.clone()),
                     DbValue::Text(encode(payload)?),
                     DbValue::Text(encode(plugin)?),
-                    DbValue::Text(encode(context)?),
+                    DbValue::Text(encode(&stored_context)?),
                     DbValue::Text(plugin.host_id.clone()),
+                    DbValue::Text(lifetime.as_str().into()),
                 ]);
-                id = Some(self.db.execute("INSERT INTO plugin_jobs(user_id,project_scope,plugin,job_key,due_at,expires_at,event,payload,prepared,context,host_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)", &params).await?.last_insert_rowid);
+                id = Some(self.db.execute("INSERT INTO plugin_jobs(user_id,project_scope,plugin,job_key,due_at,expires_at,event,payload,prepared,context,host_id,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", &params).await?.last_insert_rowid);
             }
             JobRequest::Cancel {
                 id: target,
