@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Prevent plugin HTTP from bootstrapping bridge credentials or bypassing SDK grants through Open WebIDE control APIs, preserving ordinary public and LAN HTTP access.
+
 - Add capability-gated durable plugin jobs with immutable source snapshots, idempotency keys, bounded pages, renewable leases and terminal-job cleanup. Scope callbacks to the current delivery and stop new claims for disabled plugins. Background polling, run submission and the Scheduling migration remain in progress.
 
 - Prepare pinned Rust plugins on the selected execution host before agent tools, context hooks and event callbacks. Validate source, manifest and digest before execution, supporting cold caches and offline reuse through the same shared workflow.

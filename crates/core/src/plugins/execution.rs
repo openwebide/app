@@ -2,6 +2,10 @@
 use super::PreparedPlugin;
 use serde::{Deserialize, Serialize};
 
+/// Native HTTP attaches this marker after plugin-supplied headers.
+/// App and bridge control endpoints reject plugin transport credentials.
+pub const PLUGIN_HTTP_HEADER: &str = "x-openwebide-plugin";
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginOperation {

@@ -149,7 +149,11 @@ require a publisher-hosted WASM artifact. Bundled plugins receive the same
 interfaces and privileges.
 
 The SDK, source preparation and shared execution workflow are foundations in
-progress. HTTP and clock primitives run on the bridge. Private record callbacks
+progress. HTTP and clock primitives run on the bridge. Plugin HTTP carries a host-added
+transport marker that plugin headers cannot remove. Open WebIDE rejects marked
+requests to its authenticated backend and bridge control endpoints, including
+credential bootstrap and WebSocket upgrades. Ordinary HTTP access to public and
+LAN services remains available; the HTTP capability does not supply TCP tunnels. Private record callbacks
 use opaque run grants checked against the authenticated account, session, original
 project and pinned plugin source/capabilities. Record collections persist across
 plugin updates and reinstalls, with revision checks, bounded pages and quotas.

@@ -43,6 +43,13 @@ pub(super) async fn route(
     config: ServerConfig,
     permit_cell: PermitCell,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    if req
+        .headers()
+        .contains_key(openwebide_core::plugins::execution::PLUGIN_HTTP_HEADER)
+        && (req.uri().path() != "/health" || is_websocket_upgrade(req.headers()))
+    {
+        return Ok(rejection_response(403));
+    }
     let host = req.headers().get(HOST).and_then(|v| v.to_str().ok());
     let origin = req.headers().get(ORIGIN).and_then(|v| v.to_str().ok());
     let content_type = req
