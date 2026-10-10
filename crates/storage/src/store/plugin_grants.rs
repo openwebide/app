@@ -132,6 +132,247 @@ mod tests {
             })),
         }
     }
+    #[test]
+    fn skill_collection_callbacks_preserve_ui_records_and_plugin_provenance_in_both_modes() {
+        block_on(async {
+            for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+                let store = Store::new(RusqliteDb::open_in_memory().unwrap());
+                store.migrate().await.unwrap();
+                let user = store
+                    .insert_user("owner", "hash", UserRole::Admin, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let other = store
+                    .insert_user("other", "hash", UserRole::User, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let project = store
+                    .create_project(
+                        &NewProject {
+                            name: "p".into(),
+                            mode,
+                            path: Some("p".into()),
+                        },
+                        user,
+                        0,
+                    )
+                    .await
+                    .unwrap()
+                    .id;
+                let session = store
+                    .create_session("s", None, None, Some(project), user, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let mut plugin = receipt();
+                plugin.manifest.executable.as_mut().unwrap().capabilities =
+                    vec!["collections".into()];
+                store
+                    .record_plugin(user, &installation(&plugin, None), 1)
+                    .await
+                    .unwrap();
+                let token = "a".repeat(32);
+                store
+                    .issue_plugin_grant(user, session, &plugin, &token, 2)
+                    .await
+                    .unwrap();
+                let call = |operation| PluginHostRequest {
+                    grant: token.clone(),
+                    capability: "collections".into(),
+                    payload: json!({"collection":"skills","operation":operation}).to_string(),
+                };
+                let draft = |name: &str| openwebide_core::SkillDraft {
+                    name: name.into(),
+                    description: "Build guidance".into(),
+                    instructions: "Run approved checks".into(),
+                    enabled: true,
+                    resources: vec![openwebide_core::SkillResource {
+                        name: "references/build.md".into(),
+                        content: "cargo test".into(),
+                        binary: false,
+                    }],
+                    metadata: Default::default(),
+                };
+                let ui = store
+                    .skill_command(
+                        user,
+                        project,
+                        &openwebide_core::SkillCommand::Create {
+                            draft: draft("ui-skill"),
+                        },
+                        false,
+                        1,
+                    )
+                    .await
+                    .unwrap()
+                    .entries
+                    .remove(0);
+                let read = call(json!({"action":"read","id":ui.id}));
+                let result: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(user, session, &read, 3)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    result["records"][0]["value"]["draft"]["resources"][0]["content"],
+                    "cargo test"
+                );
+                assert!(result["records"][0]["value"]["origin"].is_null());
+                assert!(
+                    store
+                        .plugin_host_request(other, session, &read, 3)
+                        .await
+                        .is_err()
+                );
+                let mut changed = draft("ui-skill");
+                changed.instructions = "Plugin changed these instructions".into();
+                let edit = call(
+                    json!({"action":"update","id":ui.id,"revision":ui.revision,"value":{"draft":changed}}),
+                );
+                store
+                    .plugin_host_request(user, session, &edit, 4)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store.project_skills(user, project).await.unwrap().entries[0]
+                        .draft
+                        .instructions,
+                    changed.instructions
+                );
+                assert!(
+                    store
+                        .plugin_host_request(user, session, &edit, 5)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .plugin_host_request(
+                            user,
+                            session,
+                            &call(json!({"action":"create","value":{"draft":draft("ui-skill")}})),
+                            5
+                        )
+                        .await
+                        .is_err()
+                );
+                assert!(store.plugin_host_request(user, session, &call(json!({"action":"create","value":{"draft":draft("invalid-skill"),"origin":{"publisher":"forged"}}})), 5).await.is_err());
+                for index in 0..9 {
+                    store.plugin_host_request(user, session, &call(json!({"action":"create","value":{"draft":draft(&format!("created-{index}"))}})), 5).await.unwrap();
+                }
+                let first: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(user, session, &call(json!({"action":"list"})), 6)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(first["records"].as_array().unwrap().len(), 8);
+                let second: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(
+                            user,
+                            session,
+                            &call(json!({"action":"list","after":first["next"]})),
+                            6,
+                        )
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(second["records"].as_array().unwrap().len(), 2);
+                // A managed skill may be read with its provenance, but its owner
+                // controls updates and deletion through plugin lifecycle operations.
+                let binding = store.db.execute("SELECT id FROM project_plugins WHERE user_id=? AND project_id=? AND repository=? AND path=?", &[
+                    DbValue::Int(user.get()),DbValue::Int(project),DbValue::Text(plugin.source.repository.clone()),DbValue::Text(plugin.source.path.clone()),
+                ]).await.unwrap().rows[0].get_int(0).unwrap();
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO project_plugin_skills(plugin_id,skill_id) VALUES(?,?)",
+                        &[DbValue::Int(binding), DbValue::Int(ui.id)],
+                    )
+                    .await
+                    .unwrap();
+                let managed: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(user, session, &read, 7)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    managed["records"][0]["value"]["origin"]["publisher"],
+                    "example"
+                );
+                assert!(
+                    store
+                        .plugin_host_request(
+                            user,
+                            session,
+                            &call(json!({"action":"delete","id":ui.id,"revision":2})),
+                            7
+                        )
+                        .await
+                        .is_err()
+                );
+                let personal = store
+                    .project_skills(user, project)
+                    .await
+                    .unwrap()
+                    .entries
+                    .into_iter()
+                    .find(|skill| skill.draft.name == "created-0")
+                    .unwrap();
+                let mut disabled_draft = personal.draft.clone();
+                disabled_draft.enabled = false;
+                store
+                    .skill_command(
+                        user,
+                        project,
+                        &openwebide_core::SkillCommand::Update {
+                            id: personal.id,
+                            revision: personal.revision,
+                            draft: disabled_draft,
+                        },
+                        false,
+                        7,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .plugin_host_request(
+                            user,
+                            session,
+                            &call(json!({"action":"read","id":personal.id})),
+                            7
+                        )
+                        .await
+                        .is_err()
+                );
+                assert!(store.plugin_host_request(user, session, &call(json!({"action":"delete","id":personal.id,"revision":personal.revision+1})), 7).await.is_err());
+                store
+                    .set_user_setting(user, &format!("project_skills_{project}"), "false")
+                    .await
+                    .unwrap();
+                let disabled: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(user, session, &read, 8)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(disabled["enabled"], false);
+                assert!(disabled["records"].as_array().unwrap().is_empty());
+                assert!(store.plugin_host_request(user, session, &call(json!({"action":"create","value":{"draft":draft("disabled-create")}})), 8).await.is_err());
+            }
+        });
+    }
     fn request(grant: &str) -> PluginHostRequest {
         PluginHostRequest {grant:grant.into(), capability:"records".into(), payload:json!({"collection":"notes","operation":{"action":"create","value":{"text":"owned"}}}).to_string()}
     }

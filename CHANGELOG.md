@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Expose existing Skills UI records through capability-gated collection CRUD, preserving resources, metadata, revisions and plugin provenance. Protect managed and disabled skills and keep authoring policy in plugin code; the executable Skill Authoring migration remains in progress.
+
 - Run read-only Rust SDK context hooks through shared planning before model tool selection in local and remote sessions. Enforce prompt budgets, grant scope and disabling only the plugin's own tools, including when model tools are disabled.
 
 - Route backend SSE tools and child tasks through the shared SDK executor and approval gate, preventing failed SDK tools from falling back to built-in behavior. Expire abandoned host invocations without waiting for another request.

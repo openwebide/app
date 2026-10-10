@@ -40,6 +40,11 @@ impl<D: Db> Store<D> {
         now: i64,
     ) -> Result<CollectionResult, StorageError> {
         request.validate().map_err(StorageError::InvalidRequest)?;
+        if request.collection == "skills" {
+            return self
+                .plugin_skills_in_transaction(user, session, request, now)
+                .await;
+        }
         if request.collection != "memories" {
             return Err(StorageError::InvalidRequest(
                 "Unknown project collection".into(),
