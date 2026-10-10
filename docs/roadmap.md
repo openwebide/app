@@ -397,13 +397,13 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
-- Connect the durable one-shot job queue and declared SDK event callbacks to
-  automatic background delivery and run submission/completion. Queue persistence,
-  version pinning, leases and scoped callback authority already share one store.
+- Add general run submission/completion capabilities for durable SDK jobs. Queue
+  persistence, automatic event delivery, version pinning, renewable leases and
+  scoped callback authority already share one workflow and store.
   Route remaining UI and background invocations through the sessionless
   execution-context API; Memory mutations already use shared guarded actions.
 - Extend authenticated, run-pinned private record callbacks with shared collection
-  adapters beyond the existing Memory and Skills data adapters, job and workspace primitives,
+  adapters beyond the existing Memory and Skills data adapters and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and
   offline compiled defaults. Marketplaces ship pinned Rust source and Cargo.lock;
   hosts compile against the declared SDK version and validate the WASM component

@@ -2,6 +2,7 @@
 pub mod actions;
 pub mod completion;
 pub mod execution;
+pub mod jobs;
 use openwebide_core::{
     ToolDefinition,
     plugins::{PluginToolGroup, ProjectPlugin, enabled_tool_groups},

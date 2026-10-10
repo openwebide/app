@@ -169,15 +169,15 @@ with sessionless grants and no built-in behavior fallback. The explicit UI actio
 grant permits manual editing while automatic Memory context is switched off;
 plugin code cannot opt itself into this authority. Plugins on a paired host do
 not require that host to see a local project's browser folder. Workspace commands
-and Git retain their separate folder mapping requirement. Durable background
-delivery and executable-default deployment remain unfinished.
+and Git retain their separate folder mapping requirement. Background run
+submission and executable-default deployment remain unfinished.
 The separate `completion` grant exposes bounded text generation through the
 session's configured primary or fast model. Plugins supply prompts and interpret
 the results; the host supplies model selection and credentials. Inputs are limited
 to 32 KiB, outputs to 1–1024 tokens and 16 KiB of text, with a 30-second completion
 deadline and no tools. Context hooks cannot request completions. The source
 Memory plugin owns its naming prompt, profile fallback and content-derived title.
-Further shared collection adapters, job and workspace callbacks, installation progress
+Further shared collection adapters, run and workspace callbacks, installation progress
 and cancellation, and compiled offline defaults still need implementation. API 2
 first-party plugins remain transitional.
 
@@ -200,9 +200,10 @@ idempotency keys, version snapshots, bounded pages and renewable delivery leases
 Jobs retain their creating plugin version across updates; disabled or removed
 plugins receive no new claims. Lease-bound callbacks stop after cancellation,
 completion or lease replacement. Terminal jobs can be deleted to release quota
-and their idempotency keys. Queue callbacks and daemon RPC are implemented;
-automatic background delivery, run submission and Scheduling policy migration
-remain unfinished.
+and their idempotency keys. The bridge polls for due events and runs them through the shared execution
+workflow, renewing leases during compilation and execution. Delivery is at least
+once; plugin code must use stable keys and revision checks for repeatable effects.
+Run submission and the Scheduling policy migration remain unfinished.
 
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.

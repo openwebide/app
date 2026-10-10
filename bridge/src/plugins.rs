@@ -1,6 +1,7 @@
 //! Native Git/object and atomic filesystem primitives for shared plugin policy.
 mod http;
 pub mod invocations;
+pub mod jobs;
 pub mod transport;
 use openwebide_core::plugins::{
     MAX_PACKAGE_BYTES, MAX_PACKAGE_FILE_BYTES, MAX_PACKAGE_FILES, PackageFile, PackageFileKind,
@@ -1061,6 +1062,96 @@ mod rust_plugin_tests {
             result.map_err(|error| error.to_string())
         }
     }
+    impl openwebide_agent::plugins::jobs::JobHost for DatabaseHost {
+        async fn request(
+            &self,
+            command: openwebide_core::plugins::jobs::JobServiceRequest,
+        ) -> Result<openwebide_core::plugins::jobs::JobServiceResponse, String> {
+            use openwebide_core::plugins::jobs::{
+                JobServiceRequest as Request, JobServiceResponse as Response,
+            };
+            let db = DatabaseHost {
+                store: self.store.clone(),
+                user: self.user,
+                session: None,
+                now: self.now,
+            };
+            let result: Result<Response, openwebide_storage::StorageError> =
+                tokio::task::spawn_blocking(move || {
+                    futures::executor::block_on(async {
+                        Ok(match command {
+                            Request::Renew { delivery } => Response::Renewed(
+                                db.store
+                                    .renew_plugin_job(
+                                        &delivery.host_id,
+                                        delivery.id,
+                                        &delivery.lease,
+                                        db.now,
+                                    )
+                                    .await?,
+                            ),
+                            Request::Grant {
+                                user_id: _,
+                                delivery,
+                            } => {
+                                let grant = "f".repeat(32);
+                                let (prepared, context) = db
+                                    .store
+                                    .issue_plugin_job_grant(
+                                        db.user,
+                                        &delivery.host_id,
+                                        delivery.id,
+                                        &delivery.lease,
+                                        &grant,
+                                        db.now,
+                                    )
+                                    .await?;
+                                Response::Authorized {
+                                    prepared: Box::new(prepared),
+                                    context,
+                                    grant,
+                                }
+                            }
+                            Request::Callback {
+                                user_id: _,
+                                request,
+                            } => Response::Callback(
+                                db.store
+                                    .plugin_context_host_request(db.user, &request, db.now)
+                                    .await?,
+                            ),
+                            Request::Finish {
+                                delivery,
+                                success,
+                                detail,
+                            } => {
+                                db.store
+                                    .finish_plugin_job(
+                                        &delivery.host_id,
+                                        delivery.id,
+                                        &delivery.lease,
+                                        success,
+                                        &detail,
+                                        db.now,
+                                    )
+                                    .await?;
+                                Response::Finished
+                            }
+                            Request::Claim { .. } => panic!("fixture already claimed its job"),
+                        })
+                    })
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            result.map_err(|error| error.to_string())
+        }
+        fn now(&self) -> i64 {
+            self.now
+        }
+        async fn wait(&self, duration: Duration) {
+            tokio::time::sleep(duration).await;
+        }
+    }
     struct NoBuiltin;
     impl openwebide_agent::ToolExecutor for NoBuiltin {
         fn describe(&self, call: &openwebide_core::ToolCall) -> String {
@@ -1189,61 +1280,44 @@ mod rust_plugin_tests {
             .jobs
             .remove(0);
         assert_eq!(delivery.job.id, queued.jobs[0].id);
-        let grant = "f".repeat(32);
-        let (pinned, context) = store
-            .issue_plugin_job_grant(
+        openwebide_agent::plugins::jobs::deliver(
+            &DatabaseHost {
+                store: store.clone(),
                 user,
-                &prepared.host_id,
-                delivery.job.id,
-                &delivery.lease,
-                &grant,
-                21,
-            )
-            .await
-            .unwrap();
-        assert!(context.session_id.is_none());
-        assert!(!context.user_action);
-        let outcome = openwebide_agent::plugins::execution::invoke_plugin(
+                session: None,
+                now: 21,
+            },
             &executor.transport,
-            &GrantedServices {
-                grants: Arc::new(
-                    [(pinned.digest.clone(), grant.clone())]
-                        .into_iter()
-                        .collect(),
-                ),
-                host: DatabaseHost {
-                    store: store.clone(),
-                    user,
-                    session: None,
-                    now: 21,
-                },
-            },
-            execution::InvokePlugin {
-                operation: execution::PluginOperation::Event,
-                prepared: pinned,
-                name: String::new(),
-                arguments: serde_json::to_string(&execution::EventInput {
-                    name: delivery.job.event.clone(),
-                    payload: delivery.job.payload.clone(),
-                })
-                .unwrap(),
-            },
+            delivery,
         )
         .await
         .unwrap();
-        assert!(outcome.ok, "{}", outcome.content);
-        assert!(outcome.content.contains("durable plugin event"));
-        store
-            .finish_plugin_job(
-                &prepared.host_id,
-                delivery.job.id,
-                &delivery.lease,
-                outcome.ok,
-                &outcome.summary,
-                22,
-            )
-            .await
-            .unwrap();
+        let completed = executor
+            .execute(&openwebide_core::ToolCall {
+                id: "job-state".into(),
+                name: "fixture_echo".into(),
+                arguments: serde_json::json!({"jobs":{"action":"read","id":queued.jobs[0].id}})
+                    .to_string(),
+            })
+            .await;
+        assert!(completed.ok, "{}", completed.content);
+        let state: openwebide_core::plugins::jobs::JobResult =
+            serde_json::from_str(&completed.content).unwrap();
+        assert_eq!(
+            state.jobs[0].state,
+            openwebide_core::plugins::jobs::JobState::Completed
+        );
+        let events = executor
+            .execute(&openwebide_core::ToolCall {
+                id: "event-effect".into(),
+                name: "fixture_echo".into(),
+                arguments: serde_json::json!({"collection":"events","operation":{"action":"list"}})
+                    .to_string(),
+            })
+            .await;
+        assert!(events.ok, "{}", events.content);
+        assert!(events.content.contains("durable plugin event"));
+        let grant = "f".repeat(32);
         let callback = execution::PluginHostRequest {
             grant,
             capability: "records".into(),

@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Deliver durable plugin events automatically through a shared worker with bounded concurrency, lease renewal during preparation/execution, sessionless grants and actor cancellation on lease loss. Run submission and executable Scheduling remain in progress.
+
 - Prevent plugin HTTP from bootstrapping bridge credentials or bypassing SDK grants through Open WebIDE control APIs, preserving ordinary public and LAN HTTP access.
 
 - Add capability-gated durable plugin jobs with immutable source snapshots, idempotency keys, bounded pages, renewable leases and terminal-job cleanup. Scope callbacks to the current delivery and stop new claims for disabled plugins. Background polling, run submission and the Scheduling migration remain in progress.
