@@ -8,7 +8,6 @@ use std::{sync::Arc, time::Duration};
 struct Host {
     backend: Arc<BackendClient>,
     execution: super::transport::PluginExecutionHost,
-    paired: bool,
 }
 impl JobHost for Host {
     async fn request(&self, command: JobServiceRequest) -> Result<JobServiceResponse, String> {
@@ -40,11 +39,7 @@ impl JobHost for Host {
 impl JobWorkerHost for Host {
     type Transport = super::transport::NativePluginTransport;
     fn transport(&self, user_id: i64) -> Self::Transport {
-        let mut transport = self.execution.transport(user_id);
-        if self.paired {
-            transport.owner = "paired".into();
-        }
-        transport
+        self.execution.transport(user_id)
     }
     fn report(&self, error: &str) {
         tracing::debug!(%error, "plugin job delivery unavailable");
@@ -56,13 +51,13 @@ pub async fn serve(config: ServerConfig) {
         hosts.push("server".into());
     }
     let host = Host {
-        paired: config.pairing_token.is_some(),
         backend: Arc::new(BackendClient::new(
             config.backend_url,
             config.secret,
             crate::runs::http_client::ReqwestHttpClient::default(),
         )),
         execution: super::transport::PluginExecutionHost {
+            paired: config.pairing_token.is_some(),
             installer: config.plugins,
             invocations: config.plugin_invocations,
         },

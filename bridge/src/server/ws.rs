@@ -472,6 +472,7 @@ impl Connection {
                     crate::runs::RunHost {
                         execution: config.execution.clone(),
                         plugins: crate::plugins::transport::PluginExecutionHost {
+                            paired: config.pairing_token.is_some(),
                             installer: config.plugins.clone(),
                             invocations: config.plugin_invocations.clone(),
                         },

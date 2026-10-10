@@ -2,6 +2,7 @@
 mod http;
 pub mod invocations;
 pub mod jobs;
+pub mod runs;
 pub mod transport;
 use openwebide_core::plugins::{
     MAX_PACKAGE_BYTES, MAX_PACKAGE_FILE_BYTES, MAX_PACKAGE_FILES, PackageFile, PackageFileKind,

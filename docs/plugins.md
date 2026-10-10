@@ -203,7 +203,7 @@ completion or lease replacement. Terminal jobs can be deleted to release quota
 and their idempotency keys. The bridge polls for due events and runs them through the shared execution
 workflow, renewing leases during compilation and execution. Delivery is at least
 once; plugin code must use stable keys and revision checks for repeatable effects.
-Run dispatch, completion delivery and the Scheduling policy migration remain unfinished.
+Durable completion callbacks and the Scheduling policy migration remain unfinished.
 
 The prototype `runs` capability exposes durable raw prompt submissions through
 `list`, `read`, `submit`, `cancel` and terminal `delete`. Submissions use stable
@@ -220,8 +220,14 @@ reports share the same durable store. Each claim receives a fresh queue revision
 and runner identity, so stale preparations cannot consume replacement claims.
 Recovery requeues only unconsumed prompts; a lost host after consumption marks the
 run interrupted. Local execution requires a user-authorized host folder binding.
-Raw run dispatch and completion delivery are still being connected;
-these primitives do not complete the executable Scheduling migration.
+The bridge now dispatches these prompts through the shared agent runner, using
+nonce-bound runner identities and the same lease, cancellation, approval and
+status policy on server and paired hosts. Busy conversations release unconsumed
+claims. Transient status-report failures retry while the lease heartbeat remains
+active; lost leases cancel preparation or execution. Daemon shutdown drops active
+deliveries. Completed reports retain bounded raw assistant output, without
+interpreting a task or monitor outcome. Durable completion callbacks and the
+executable Scheduling migration remain unfinished.
 
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.

@@ -9,9 +9,11 @@ for what's still ahead.
 
 ## [Unreleased]
 
-- Add host-bound raw plugin run claims, renewable leases, status acknowledgements and recovery that never replays consumed prompts. Cancel dropped agent preparations and release their reservations; automatic run dispatch and completion remain in progress.
+- Dispatch raw plugin prompts automatically through the shared host runner on server and paired hosts. Renew leases during preparation and execution, release busy claims, retry status acknowledgements and cancel deliveries on lease loss or shutdown. Durable completion callbacks and executable Scheduling remain in progress.
 
-- Add capability-gated durable raw plugin prompt submissions with owned conversations, idempotency keys, bounded history, model pins and atomic queue delivery guards. Keep plugin prompts out of browser queue draining; host run dispatch and Scheduling remain in progress.
+- Add host-bound raw plugin run claims, renewable leases, status acknowledgements and recovery that never replays consumed prompts. Cancel dropped agent preparations and release their reservations; completion callbacks remain in progress.
+
+- Add capability-gated durable raw plugin prompt submissions with owned conversations, idempotency keys, bounded history, model pins and atomic queue delivery guards. Keep plugin prompts out of browser queue draining; completion callbacks and Scheduling remain in progress.
 
 - Deliver durable plugin events automatically through a shared worker with bounded concurrency, lease renewal during preparation/execution, sessionless grants and actor cancellation on lease loss. Run submission and executable Scheduling remain in progress.
 

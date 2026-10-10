@@ -397,8 +397,8 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
-- Connect durable raw SDK prompt submissions to host dispatch and completion
-  delivery; owned conversations, model pins and queue-consumption guards exist. Queue
+- Add durable completion callbacks for raw SDK prompt submissions; shared host
+  dispatch, owned conversations, model pins and queue-consumption guards exist. Queue
   persistence, automatic event delivery, version pinning, renewable leases and
   scoped callback authority already share one workflow and store.
   Route remaining UI and background invocations through the sessionless

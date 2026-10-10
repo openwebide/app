@@ -326,18 +326,17 @@ fn a_slow_claim_does_not_suspend_existing_delivery_futures() {
     use std::future::Future;
     let mut host = host("server");
     host.slow_claim = true;
-    let mut running = Deliveries::new();
+    let mut running = super::super::worker::Deliveries::new();
     let active = host.clone();
     running.push(Box::pin(async move {
         active.record("active-delivery");
         Ok(())
     }));
-    let mut claim = Box::pin(claim(
-        &host,
-        JobServiceRequest::Claim {
-            host_id: "server".into(),
-            after: 0,
-        },
+    let worker = Worker(host.clone());
+    let mut claim = Box::pin(super::super::worker::poll(
+        &worker,
+        "server",
+        0,
         &mut running,
     ));
     let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());

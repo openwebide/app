@@ -7,13 +7,18 @@ use openwebide_core::plugins::execution::{ContinuePlugin, InvokePlugin, PluginIn
 pub struct PluginExecutionHost {
     pub installer: NativePluginInstaller,
     pub invocations: Invocations,
+    pub paired: bool,
 }
 impl PluginExecutionHost {
     pub fn transport(&self, owner: i64) -> NativePluginTransport {
         NativePluginTransport {
             installer: self.installer.clone(),
             invocations: self.invocations.clone(),
-            owner: format!("user:{owner}"),
+            owner: if self.paired {
+                "paired".into()
+            } else {
+                format!("user:{owner}")
+            },
         }
     }
 }

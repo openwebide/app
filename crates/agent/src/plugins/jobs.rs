@@ -212,108 +212,44 @@ pub trait JobWorkerHost: JobHost + Clone + Send + Sync + 'static {
     fn report(&self, error: &str);
 }
 
-/// One poll/concurrency policy for jobs installed from either project mode.
-/// Dropping this future drops all deliveries, cancelling their active actors.
-type Deliveries =
-    futures::stream::FuturesUnordered<futures::future::BoxFuture<'static, Result<(), String>>>;
-
-async fn claim<H: JobWorkerHost>(
-    host: &H,
-    command: JobServiceRequest,
-    running: &mut Deliveries,
-) -> Result<JobServiceResponse, String> {
-    use futures::StreamExt;
-    let mut request = Box::pin(host.request(command));
-    loop {
-        let complete = async {
-            if running.is_empty() {
-                futures::future::pending::<()>().await;
-            }
-            running.next().await
+#[derive(Clone)]
+struct Worker<H>(H);
+impl<H: JobWorkerHost> super::worker::Worker for Worker<H> {
+    type Delivery = JobDelivery;
+    async fn poll(
+        &self,
+        host: &str,
+        after: i64,
+    ) -> Result<super::worker::Page<JobDelivery>, String> {
+        let JobServiceResponse::Claimed(page) = self
+            .0
+            .request(JobServiceRequest::Claim {
+                host_id: host.into(),
+                after,
+            })
+            .await?
+        else {
+            return Err("Unexpected plugin job claim response".into());
         };
-        match futures::future::select(request, Box::pin(complete)).await {
-            futures::future::Either::Left((result, remaining)) => {
-                drop(remaining);
-                return result;
-            }
-            futures::future::Either::Right((result, remaining)) => {
-                request = remaining;
-                if let Some(Err(error)) = result {
-                    host.report(&error);
-                }
-            }
-        }
+        Ok(super::worker::Page {
+            items: page.jobs,
+            next_after: page.next_after,
+        })
+    }
+    async fn execute(&self, delivery: JobDelivery) -> Result<(), String> {
+        let transport = self.0.transport(delivery.user_id);
+        deliver(&self.0, &transport, delivery).await
+    }
+    fn belongs_to(&self, delivery: &JobDelivery, host: &str) -> bool {
+        delivery.prepared.host_id == host
+    }
+    async fn wait(&self, duration: Duration) {
+        self.0.wait(duration).await;
+    }
+    fn report(&self, error: &str) {
+        self.0.report(error);
     }
 }
-
 pub async fn serve<H: JobWorkerHost>(host: H, hosts: Vec<String>) {
-    use futures::StreamExt;
-    let mut running = Deliveries::new();
-    if hosts.is_empty() {
-        return;
-    }
-    let mut cursors = vec![0; hosts.len()];
-    let mut selected = 0;
-    loop {
-        let tick = host.wait(Duration::from_secs(5));
-        let complete = async {
-            if running.is_empty() {
-                futures::future::pending::<()>().await;
-            }
-            running.next().await
-        };
-        match futures::future::select(Box::pin(tick), Box::pin(complete)).await {
-            futures::future::Either::Right((result, _)) => {
-                if let Some(Err(error)) = result {
-                    host.report(&error);
-                }
-                continue;
-            }
-            futures::future::Either::Left(((), remaining)) => drop(remaining),
-        }
-        // Claim never leases work we cannot run: reserve a full bounded batch.
-        if running.len() > openwebide_core::plugins::jobs::MAX_JOB_DELIVERIES {
-            continue;
-        }
-        let index = selected;
-        selected = (selected + 1) % hosts.len();
-        let page = match claim(
-            &host,
-            JobServiceRequest::Claim {
-                host_id: hosts[index].clone(),
-                after: cursors[index],
-            },
-            &mut running,
-        )
-        .await
-        {
-            Ok(JobServiceResponse::Claimed(page)) => page,
-            Ok(_) => {
-                host.report("Unexpected plugin job claim response");
-                continue;
-            }
-            Err(error) => {
-                host.report(&error);
-                continue;
-            }
-        };
-        if page.jobs.len() > openwebide_core::plugins::jobs::MAX_JOB_DELIVERIES
-            || page
-                .jobs
-                .iter()
-                .any(|job| job.prepared.host_id != hosts[index])
-            || page.next_after.is_some_and(|next| next <= cursors[index])
-        {
-            host.report("Invalid plugin job delivery page");
-            continue;
-        }
-        cursors[index] = page.next_after.unwrap_or(0);
-        for delivery in page.jobs {
-            let host = host.clone();
-            let transport = host.transport(delivery.user_id);
-            running.push(Box::pin(async move {
-                deliver(&host, &transport, delivery).await
-            }));
-        }
-    }
+    super::worker::serve(Worker(host), hosts).await;
 }
