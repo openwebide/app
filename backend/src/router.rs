@@ -37,6 +37,8 @@ enum Route {
     PushDispatch,
     ScheduledList,
     ScheduledCommand,
+    ScheduledMonitors,
+    BindBackgroundHost,
     ScheduledSessionCommand,
     ScheduledDue,
     PluginJobService,
@@ -197,6 +199,10 @@ fn resolve(method: &str, segments: &[&str]) -> Option<Route> {
         ("DELETE", ["push", "subscriptions"]) => Some(Route::PushUnsubscribe),
         ("POST", ["push", "dispatch"]) => Some(Route::PushDispatch),
         ("POST", ["sessions", id, "notifications"]) if numeric_id(id) => Some(Route::PushNotify),
+        ("GET", ["sessions", id, "monitors"]) if numeric_id(id) => Some(Route::ScheduledMonitors),
+        ("POST", ["projects", id, "execution-host"]) if numeric_id(id) => {
+            Some(Route::BindBackgroundHost)
+        }
         ("GET", ["scheduled-tasks"]) => Some(Route::ScheduledList),
         ("POST", ["scheduled-tasks"]) => Some(Route::ScheduledCommand),
         ("GET", ["host", "connection"]) => Some(Route::HostConnection),
@@ -599,6 +605,12 @@ pub async fn route(req: Request) -> JsonResp {
         }
         (Some(Route::HostInspect), Some(user)) => {
             api::host_admin::inspect(req, &state, &path, user).await
+        }
+        (Some(Route::ScheduledMonitors), Some(user)) => {
+            api::scheduled::monitors(&state, &path, user).await
+        }
+        (Some(Route::BindBackgroundHost), Some(user)) => {
+            api::scheduled::bind_host(req, &state, &path, user).await
         }
         (Some(Route::ScheduledSessionCommand), Some(user)) => {
             api::scheduled::session_command(req, &state, &path, user).await
@@ -1094,6 +1106,12 @@ mod tests {
             ("PUT", "system-prompts/5", Route::UpdateSystemPrompt),
             ("DELETE", "system-prompts/5", Route::DeleteSystemPrompt),
             ("GET", "projects/5/skills", Route::GetProjectSkills),
+            ("GET", "sessions/5/monitors", Route::ScheduledMonitors),
+            (
+                "POST",
+                "projects/5/execution-host",
+                Route::BindBackgroundHost,
+            ),
             ("POST", "projects/5/skills", Route::ProjectSkillCommand),
             ("GET", "sessions/5/skills", Route::GetSessionSkills),
             ("POST", "sessions/5/skills", Route::SessionSkillCommand),

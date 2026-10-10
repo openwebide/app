@@ -406,11 +406,11 @@ capability.
   bindings project raw-run progress and retain terminal snapshots after cleanup.
   Declared background events now drive source-owned timer/run/deletion repair and
   source-version handoff, through current enabled bindings in both host modes. Finish
-  source-owned retention and preflight failure reporting, UI mutation integration
+  source-owned retention and preflight failure reporting
   and complete cancellation/recovery verification,
-  then activate the executable release. Route remaining UI and
-  background invocations through the sessionless execution-context API; Memory
-  mutations already use shared guarded actions.
+  then activate the executable release. Task and monitor mutations now share guarded
+  SDK actions with Memory; verify the deployed paired-host browser lifecycle and
+  executable defaults before removing transitional built-in handlers.
 - Extend authenticated, run-pinned private record callbacks with shared collection
   adapters beyond the existing Memory and Skills data adapters and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and

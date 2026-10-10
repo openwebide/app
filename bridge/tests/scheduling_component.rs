@@ -165,6 +165,35 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
             block_on(store.scheduled_tasks(user, Some(project), 100)).unwrap()[0].id,
             task
         );
+        let original_title = record[0]["title"].clone();
+        for (revision, enabled) in [(1, false), (2, true)] {
+            let call = openwebide_core::scheduled::TaskCommand::SetEnabled {
+                id: task,
+                revision,
+                enabled,
+            }
+            .plugin_call()
+            .unwrap();
+            let outcome = runtime
+                .execute(
+                    &bytes,
+                    services.clone(),
+                    capabilities,
+                    &call.name,
+                    &call.arguments,
+                )
+                .unwrap();
+            assert!(outcome.ok, "{}", outcome.content);
+            let value: Value = serde_json::from_str(&outcome.content).unwrap();
+            assert_eq!(value[0]["title"], original_title);
+            assert_eq!(value[0]["enabled"], enabled);
+            assert_eq!(
+                block_on(store.scheduled_tasks(user, Some(project), 100)).unwrap()[0]
+                    .draft
+                    .enabled,
+                enabled
+            );
+        }
         // Simulate a dropped actor after saving a task but before its timer is durable.
         let mut repair = services.clone();
         let jobs: Value = serde_json::from_str(
@@ -177,7 +206,7 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
             .as_array()
             .unwrap()
             .iter()
-            .find(|job| job["event"] == "task_due")
+            .find(|job| job["event"] == "task_due" && job["state"] == "pending")
             .unwrap();
         let cancelled: Value = serde_json::from_str(
             &repair
@@ -346,7 +375,7 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
         let removed = runtime
             .execute(
                 &bytes,
-                services,
+                services.clone(),
                 capabilities,
                 "schedule_delete",
                 &json!({"id":task,"revision":revision}).to_string(),
@@ -355,6 +384,53 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
         assert!(removed.ok, "{}", removed.content);
         assert!(
             block_on(store.scheduled_tasks(user, Some(project), 105))
+                .unwrap()
+                .is_empty()
+        );
+        let call = openwebide_core::scheduled::TaskCommand::Monitor {
+            session_id: session,
+            command: openwebide_core::scheduled::MonitorCommand::Start {
+                prompt: "Check deployment".into(),
+                delay_seconds: 5,
+                interval_seconds: 10,
+                max_checks: 1,
+            },
+        }
+        .plugin_call()
+        .unwrap();
+        let started = runtime
+            .execute(
+                &bytes,
+                services.clone(),
+                capabilities,
+                &call.name,
+                &call.arguments,
+            )
+            .unwrap();
+        assert!(started.ok, "{}", started.content);
+        let monitors = block_on(store.scheduled_monitors(user, session, 105)).unwrap();
+        assert_eq!(monitors.len(), 1);
+        let call = openwebide_core::scheduled::TaskCommand::Monitor {
+            session_id: session,
+            command: openwebide_core::scheduled::MonitorCommand::Cancel {
+                id: monitors[0].id,
+                revision: monitors[0].revision,
+            },
+        }
+        .plugin_call()
+        .unwrap();
+        let cancelled = runtime
+            .execute(
+                &bytes,
+                services.clone(),
+                capabilities,
+                &call.name,
+                &call.arguments,
+            )
+            .unwrap();
+        assert!(cancelled.ok, "{}", cancelled.content);
+        assert!(
+            block_on(store.scheduled_monitors(user, session, 105))
                 .unwrap()
                 .is_empty()
         );

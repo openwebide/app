@@ -70,6 +70,9 @@ pub struct FakeBackend {
             ),
         >,
     >,
+    pub plugin_actor_contexts:
+        RefCell<BTreeMap<String, openwebide_core::plugins::execution::PluginExecutionContext>>,
+    pub plugin_action_calls: RefCell<Vec<(Option<i64>, openwebide_core::ToolCall)>>,
     pub plugin_actors: RefCell<BTreeMap<String, openwebide_core::plugins::execution::InvokePlugin>>,
     pub plugin_commands: RefCell<Vec<(i64, openwebide_core::plugins::ProjectPluginCommand)>>,
     pub project_plugin_entries:
@@ -237,6 +240,118 @@ pub struct FakeBackend {
 }
 
 impl FakeBackend {
+    fn fixture_tasks<'a>(
+        &'a self,
+        project: Option<i64>,
+        command: &'a openwebide_core::scheduled::TaskCommand,
+        _binding: Option<&'a openwebide_core::scheduled::HostBinding>,
+    ) -> LocalBoxFuture<'a, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
+        Box::pin(async move {
+            use openwebide_core::scheduled::{ScheduledTask, TaskCommand};
+            {
+                let mut entries = self.scheduled.borrow_mut();
+                match command {
+                    TaskCommand::Monitor { .. } => {
+                        return Err("Monitor test adapter not configured".into());
+                    }
+                    TaskCommand::List => {}
+                    TaskCommand::Create { draft } => {
+                        draft.validate(openwebide_core::now_seconds(js_sys::Date::now()))?;
+                        let id = entries.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+                        entries.push(ScheduledTask {
+                            id,
+                            revision: 1,
+                            project_id: project,
+                            draft: draft.clone(),
+                            next_run: draft
+                                .schedule
+                                .next_after(openwebide_core::now_seconds(js_sys::Date::now()))?,
+                            host_id: "server".into(),
+                            host_available: true,
+                            last_run: None,
+                        });
+                    }
+                    TaskCommand::Update {
+                        id,
+                        revision,
+                        draft,
+                    } => {
+                        let task = entries
+                            .iter_mut()
+                            .find(|task| {
+                                task.id == *id
+                                    && task.revision == *revision
+                                    && task.project_id == project
+                            })
+                            .ok_or("Task changed")?;
+                        task.draft = draft.clone();
+                        task.revision += 1;
+                    }
+                    TaskCommand::SetEnabled {
+                        id,
+                        revision,
+                        enabled,
+                    } => {
+                        let task = entries
+                            .iter_mut()
+                            .find(|task| {
+                                task.id == *id
+                                    && task.revision == *revision
+                                    && task.project_id == project
+                            })
+                            .ok_or("Task changed")?;
+                        task.draft.enabled = *enabled;
+                        task.revision += 1;
+                    }
+                    TaskCommand::Delete { id, revision } => {
+                        let pos = entries
+                            .iter()
+                            .position(|task| {
+                                task.id == *id
+                                    && task.revision == *revision
+                                    && task.project_id == project
+                            })
+                            .ok_or("Task changed")?;
+                        entries.remove(pos);
+                    }
+                }
+            }
+            self.scheduled_tasks(project).await
+        })
+    }
+    fn fixture_monitor<'a>(
+        &'a self,
+        session: i64,
+        command: &'a openwebide_core::scheduled::TaskCommand,
+    ) -> LocalBoxFuture<'a, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
+        Box::pin(async move {
+            use openwebide_core::scheduled::{MonitorCommand, TaskCommand};
+            let pending = self.monitor_results.borrow_mut().pop_front();
+            if let Some(pending) = pending {
+                return pending
+                    .await
+                    .unwrap_or_else(|_| Err("response dropped".into()));
+            }
+            let TaskCommand::Monitor { command, .. } = command else {
+                return Err("Expected a monitor command".into());
+            };
+            let mut entries = self.monitors.borrow_mut();
+            let tasks = entries.entry(session).or_default();
+            match command {
+                MonitorCommand::List {} => {}
+                MonitorCommand::Cancel { id, revision } => {
+                    let pos = tasks
+                        .iter()
+                        .position(|task| task.id == *id && task.revision == *revision)
+                        .ok_or("Monitor changed")?;
+                    tasks.remove(pos);
+                }
+                MonitorCommand::Start { .. } => return Err("Seed monitors to test creation".into()),
+            }
+            Ok(tasks.clone())
+        })
+    }
+
     fn read(&self, project: i64, path: &str) -> Result<String, String> {
         self.files
             .borrow()
@@ -297,15 +412,18 @@ impl Backend for FakeBackend {
             });
             let mut grants = BTreeMap::new();
             for plugin in &request.plugins {
-                if !self
-                    .project_plugin_entries
-                    .borrow()
-                    .get(&request.context.project_id.unwrap_or(0))
-                    .is_some_and(|bindings| {
-                        bindings.iter().any(|binding| {
-                            binding.enabled && binding.prepared.digest == plugin.digest
-                        })
-                    })
+                let bindings = match request.context.project_id {
+                    Some(project) => self
+                        .project_plugin_entries
+                        .borrow()
+                        .get(&project)
+                        .cloned()
+                        .unwrap_or_default(),
+                    None => openwebide_core::plugins::default_bindings(&self.plugins.borrow()),
+                };
+                if !bindings
+                    .iter()
+                    .any(|binding| binding.enabled && binding.prepared.digest == plugin.digest)
                 {
                     return Err("Plugin is no longer enabled".into());
                 }
@@ -329,6 +447,24 @@ impl Backend for FakeBackend {
                 method: "start_plugin_invocation",
             });
             let id = format!("actor-{}", self.calls.borrow().len());
+            let context = self
+                .plugin_authorities
+                .borrow()
+                .get(&request.grant)
+                .ok_or("Missing authority")?
+                .0
+                .clone();
+            self.plugin_action_calls.borrow_mut().push((
+                context.project_id,
+                openwebide_core::ToolCall {
+                    id: id.clone(),
+                    name: request.call.name.clone(),
+                    arguments: request.call.arguments.clone(),
+                },
+            ));
+            self.plugin_actor_contexts
+                .borrow_mut()
+                .insert(id.clone(), context);
             self.plugin_actors
                 .borrow_mut()
                 .insert(id.clone(), request.call.clone());
@@ -354,6 +490,50 @@ impl Backend for FakeBackend {
                 .get(&request.id)
                 .cloned()
                 .ok_or("Missing actor")?;
+            if call.name.starts_with("schedule_") || call.name == "monitor" {
+                let mut args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).map_err(|error| error.to_string())?;
+                let context = self
+                    .plugin_actor_contexts
+                    .borrow_mut()
+                    .remove(&request.id)
+                    .ok_or("Missing fixture context")?;
+                self.plugin_actors.borrow_mut().remove(&request.id);
+                let result = if call.name == "monitor" {
+                    let session = args["session_id"]
+                        .as_i64()
+                        .ok_or("Missing monitor conversation")?;
+                    args.as_object_mut().unwrap().remove("session_id");
+                    let command = openwebide_core::scheduled::TaskCommand::Monitor {
+                        session_id: session,
+                        command: serde_json::from_value(args).map_err(|error| error.to_string())?,
+                    };
+                    self.fixture_monitor(session, &command).await
+                } else {
+                    args.as_object_mut().unwrap().insert(
+                        "action".into(),
+                        serde_json::json!(call.name.strip_prefix("schedule_").unwrap()),
+                    );
+                    let command =
+                        serde_json::from_value(args).map_err(|error| error.to_string())?;
+                    self.fixture_tasks(context.project_id, &command, None).await
+                };
+                return Ok(PluginInvocation {
+                    id: request.id.clone(),
+                    step: match result {
+                        Ok(value) => PluginStep::Complete {
+                            ok: true,
+                            content: serde_json::to_string(&value).unwrap(),
+                            summary: "Fixture task action".into(),
+                        },
+                        Err(error) => PluginStep::Complete {
+                            ok: false,
+                            content: error,
+                            summary: "Fixture task failure".into(),
+                        },
+                    },
+                });
+            }
             let step = if request.sequence == 0 {
                 let args: serde_json::Value =
                     serde_json::from_str(&call.arguments).map_err(|error| error.to_string())?;
@@ -379,6 +559,7 @@ impl Backend for FakeBackend {
                 }
             } else {
                 self.plugin_actors.borrow_mut().remove(&request.id);
+                self.plugin_actor_contexts.borrow_mut().remove(&request.id);
                 match &request.response {
                     Ok(content) => PluginStep::Complete {
                         ok: true,
@@ -407,6 +588,7 @@ impl Backend for FakeBackend {
                 method: "cancel_plugin_invocation",
             });
             self.plugin_actors.borrow_mut().remove(id);
+            self.plugin_actor_contexts.borrow_mut().remove(id);
             Ok(())
         })
     }
@@ -2525,83 +2707,12 @@ impl Backend for FakeBackend {
         &'a self,
         project: Option<i64>,
         command: &'a openwebide_core::scheduled::TaskCommand,
-        _binding: Option<&'a openwebide_core::scheduled::HostBinding>,
+        binding: Option<&'a openwebide_core::scheduled::HostBinding>,
     ) -> LocalBoxFuture<'a, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
-        Box::pin(async move {
-            use openwebide_core::scheduled::{ScheduledTask, TaskCommand};
-            self.scheduled_commands
-                .borrow_mut()
-                .push((project, command.clone()));
-            {
-                let mut entries = self.scheduled.borrow_mut();
-                match command {
-                    TaskCommand::Monitor { .. } => {
-                        return Err("Monitor test adapter not configured".into());
-                    }
-                    TaskCommand::List => {}
-                    TaskCommand::Create { draft } => {
-                        draft.validate(openwebide_core::now_seconds(js_sys::Date::now()))?;
-                        let id = entries.iter().map(|task| task.id).max().unwrap_or(0) + 1;
-                        entries.push(ScheduledTask {
-                            id,
-                            revision: 1,
-                            project_id: project,
-                            draft: draft.clone(),
-                            next_run: draft
-                                .schedule
-                                .next_after(openwebide_core::now_seconds(js_sys::Date::now()))?,
-                            host_id: "server".into(),
-                            host_available: true,
-                            last_run: None,
-                        });
-                    }
-                    TaskCommand::Update {
-                        id,
-                        revision,
-                        draft,
-                    } => {
-                        let task = entries
-                            .iter_mut()
-                            .find(|task| {
-                                task.id == *id
-                                    && task.revision == *revision
-                                    && task.project_id == project
-                            })
-                            .ok_or("Task changed")?;
-                        task.draft = draft.clone();
-                        task.revision += 1;
-                    }
-                    TaskCommand::SetEnabled {
-                        id,
-                        revision,
-                        enabled,
-                    } => {
-                        let task = entries
-                            .iter_mut()
-                            .find(|task| {
-                                task.id == *id
-                                    && task.revision == *revision
-                                    && task.project_id == project
-                            })
-                            .ok_or("Task changed")?;
-                        task.draft.enabled = *enabled;
-                        task.revision += 1;
-                    }
-                    TaskCommand::Delete { id, revision } => {
-                        let pos = entries
-                            .iter()
-                            .position(|task| {
-                                task.id == *id
-                                    && task.revision == *revision
-                                    && task.project_id == project
-                            })
-                            .ok_or("Task changed")?;
-                        entries.remove(pos);
-                    }
-                }
-            }
-            self.scheduled_tasks(project).await
-        })
+        self.scheduled_commands
+            .borrow_mut()
+            .push((project, command.clone()));
+        self.fixture_tasks(project, command, binding)
     }
     fn project_skills(
         &self,
@@ -2747,40 +2858,32 @@ impl Backend for FakeBackend {
             Ok(data.clone())
         })
     }
+    fn scheduled_monitors(
+        &self,
+        session: i64,
+    ) -> LocalBoxFuture<'_, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
+        Box::pin(async move {
+            let pending = self.monitor_results.borrow_mut().pop_front();
+            if let Some(pending) = pending {
+                return pending.await.map_err(|error| error.to_string())?;
+            }
+            Ok(self
+                .monitors
+                .borrow()
+                .get(&session)
+                .cloned()
+                .unwrap_or_default())
+        })
+    }
     fn scheduled_session_command<'a>(
         &'a self,
         session: i64,
         command: &'a openwebide_core::scheduled::TaskCommand,
     ) -> LocalBoxFuture<'a, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
-        Box::pin(async move {
-            use openwebide_core::scheduled::{MonitorCommand, TaskCommand};
-            self.scheduled_commands
-                .borrow_mut()
-                .push((None, command.clone()));
-            let pending = self.monitor_results.borrow_mut().pop_front();
-            if let Some(pending) = pending {
-                return pending
-                    .await
-                    .unwrap_or_else(|_| Err("response dropped".into()));
-            }
-            let TaskCommand::Monitor { command, .. } = command else {
-                return Err("Expected a monitor command".into());
-            };
-            let mut entries = self.monitors.borrow_mut();
-            let tasks = entries.entry(session).or_default();
-            match command {
-                MonitorCommand::List {} => {}
-                MonitorCommand::Cancel { id, revision } => {
-                    let pos = tasks
-                        .iter()
-                        .position(|task| task.id == *id && task.revision == *revision)
-                        .ok_or("Monitor changed")?;
-                    tasks.remove(pos);
-                }
-                MonitorCommand::Start { .. } => return Err("Seed monitors to test creation".into()),
-            }
-            Ok(tasks.clone())
-        })
+        self.scheduled_commands
+            .borrow_mut()
+            .push((None, command.clone()));
+        self.fixture_monitor(session, command)
     }
     fn project_memories(
         &self,

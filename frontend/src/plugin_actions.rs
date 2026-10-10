@@ -28,6 +28,17 @@ pub async fn invoke_project_plugin_action(
     approved: bool,
     current: impl Fn() -> bool + Clone + 'static,
 ) -> Result<openwebide_agent::ToolOutcome, String> {
+    invoke_scoped_plugin_action(api, host, Some(project), call, approved, current).await
+}
+
+pub async fn invoke_scoped_plugin_action(
+    api: Api,
+    host: ProjectHost,
+    project: Option<i64>,
+    call: &ToolCall,
+    approved: bool,
+    current: impl Fn() -> bool + Clone + 'static,
+) -> Result<openwebide_agent::ToolOutcome, String> {
     let revision = host.revision();
     let current = move || current() && host.revision() == revision;
     if !current() {
@@ -36,9 +47,12 @@ pub async fn invoke_project_plugin_action(
     let backend = api
         .try_with_value(Clone::clone)
         .ok_or("Plugin action context changed")?;
-    let bindings = backend.project_plugins(project).await?;
+    let bindings = match project {
+        Some(project) => backend.project_plugins(project).await?,
+        None => openwebide_core::plugins::default_bindings(&backend.plugin_installations().await?),
+    };
     openwebide_agent::plugins::actions::select_plugin_action(&bindings, call, approved)?;
-    let execution = host.plugin_host(Some(project), current.clone())?;
+    let execution = host.plugin_host(project, current.clone())?;
     let transport = match execution {
         PluginExecutionHost::Remote {
             api, project_id, ..
@@ -50,7 +64,7 @@ pub async fn invoke_project_plugin_action(
         transport: SendWrapper::new(transport),
         context: PluginExecutionContext {
             user_action: true,
-            project_id: Some(project),
+            project_id: project,
             session_id: None,
             primary: None,
         },

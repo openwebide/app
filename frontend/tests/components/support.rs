@@ -171,6 +171,53 @@ impl TestState {
         );
     }
 
+    pub fn seed_scheduling_plugin(&self) {
+        use openwebide_core::plugins::{
+            PluginInstallation, PluginTool, PluginUpdatePolicy, ProjectPlugin, RustPlugin,
+        };
+        let mut prepared = openwebide_core::plugins::testing::receipt();
+        prepared.manifest.compatibility.plugin_api = 3;
+        prepared.manifest.contributions.skills.clear();
+        prepared.manifest.contributions.tools = [
+            "schedule_create",
+            "schedule_update",
+            "schedule_set_enabled",
+            "schedule_delete",
+            "monitor",
+        ]
+        .into_iter()
+        .map(|name| PluginTool {
+            name: name.into(),
+            description: "Scheduling UI fixture".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            requires_approval: true,
+        })
+        .collect();
+        prepared.manifest.executable = Some(RustPlugin {
+            manifest: "Cargo.toml".into(),
+            library: "tasks_fixture".into(),
+            sdk_version: "0.1.0".into(),
+            capabilities: vec!["collections".into()],
+        });
+        self.fake.project_plugin_entries.borrow_mut().insert(
+            1,
+            vec![ProjectPlugin {
+                id: 1,
+                revision: 1,
+                enabled: true,
+                prepared: prepared.clone(),
+            }],
+        );
+        self.fake.plugins.borrow_mut().push(PluginInstallation {
+            prepared,
+            revision: 1,
+            installed_at: 0,
+            hosts: vec!["server".into()],
+            default_enabled: true,
+            update_policy: PluginUpdatePolicy::Notify,
+        });
+    }
+
     pub fn seed_memory_plugin(&self) -> openwebide_core::plugins::PreparedPlugin {
         use openwebide_core::plugins::{PluginTool, ProjectPlugin, RustPlugin};
         let mut prepared = openwebide_core::plugins::testing::receipt();

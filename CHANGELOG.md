@@ -9,11 +9,13 @@ for what's still ahead.
 
 ## [Unreleased]
 
-- Deliver declared periodic plugin background events through the shared leased queue on both host modes, using current enabled source bindings and sessionless grants. Preserve deadlines across restarts, revoke replaced background actors and reserve recovery capacity even when the user job queue is full. The unlisted Scheduling source repairs interrupted timers, run bookkeeping, deletion and source-version handoffs; retention, UI mutations and deployment remain in progress.
+- Route Tasks create, edit, pause/resume and delete, plus monitor mutations, through declared SDK tools in the shared host facade. Preserve projectless scope, titles on enablement and conversation-scoped monitor cancellation. Monitor flyout refreshes only read owned data; local unattended work uses the shared host folder binding. Executable defaults and deployed paired-host verification remain in progress.
 
-- Project SDK raw-run progress into existing task history through scoped immutable bindings. Preserve legacy history IDs and final snapshots after raw-run cleanup; Scheduling source records bindings through the public SDK. UI mutations, lifecycle recovery and deployment remain in progress.
+- Deliver declared periodic plugin background events through the shared leased queue on both host modes, using current enabled source bindings and sessionless grants. Preserve deadlines across restarts, revoke replaced background actors and reserve recovery capacity even when the user job queue is full. The unlisted Scheduling source repairs interrupted timers, run bookkeeping, deletion and source-version handoffs; retention and deployment remain in progress.
 
-- Expose current account model preferences and shared public server metadata through read-only SDK collections, without choosing models or exporting endpoints. The unlisted Scheduling Rust source now owns CRUD, due delivery, recurrence, cancellation and monitor-result handlers; lifecycle recovery, UI mutation integration and deployment remain in progress.
+- Project SDK raw-run progress into existing task history through scoped immutable bindings. Preserve legacy history IDs and final snapshots after raw-run cleanup; Scheduling source records bindings through the public SDK. Lifecycle recovery and deployment remain in progress.
+
+- Expose current account model preferences and shared public server metadata through read-only SDK collections, without choosing models or exporting endpoints. The unlisted Scheduling Rust source now owns CRUD, due delivery, recurrence, cancellation and monitor-result handlers; lifecycle recovery and deployment remain in progress.
 
 - Expose existing task and monitor data through scoped SDK collection CRUD with revisions and plugin ownership. Preserve task IDs/history and keep plugin-owned tasks out of legacy dispatch. Add atomic record prerequisites to raw prompt submissions so stale handlers cannot queue new work after an edit or deletion; Scheduling handlers and deployment remain in progress.
 

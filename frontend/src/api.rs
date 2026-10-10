@@ -1067,6 +1067,22 @@ impl BackendApi {
         ))
         .await
     }
+    pub async fn scheduled_monitors(
+        &self,
+        session: i64,
+    ) -> Result<Vec<openwebide_core::scheduled::ScheduledTask>, String> {
+        self.get(&format!("/sessions/{session}/monitors")).await
+    }
+    pub async fn bind_background_host(
+        &self,
+        project: i64,
+        binding: &openwebide_core::scheduled::HostBinding,
+    ) -> Result<(), String> {
+        let _: serde_json::Value = self
+            .post(&format!("/projects/{project}/execution-host"), binding)
+            .await?;
+        Ok(())
+    }
     pub async fn scheduled_command(
         &self,
         project: Option<i64>,

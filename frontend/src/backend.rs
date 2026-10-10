@@ -502,6 +502,19 @@ pub trait Backend {
     ) -> LocalBoxFuture<'_, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+    fn scheduled_monitors(
+        &self,
+        _session: i64,
+    ) -> LocalBoxFuture<'_, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn bind_background_host<'a>(
+        &'a self,
+        _project: i64,
+        _binding: &'a openwebide_core::scheduled::HostBinding,
+    ) -> LocalBoxFuture<'a, Result<(), String>> {
+        Box::pin(async { Err("Project execution host unavailable".into()) })
+    }
     fn scheduled_command<'a>(
         &'a self,
         _project: Option<i64>,
@@ -1475,6 +1488,19 @@ impl Backend for BackendApi {
         project: Option<i64>,
     ) -> LocalBoxFuture<'_, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
         Box::pin(BackendApi::scheduled_tasks(self, project))
+    }
+    fn scheduled_monitors(
+        &self,
+        session: i64,
+    ) -> LocalBoxFuture<'_, Result<Vec<openwebide_core::scheduled::ScheduledTask>, String>> {
+        Box::pin(BackendApi::scheduled_monitors(self, session))
+    }
+    fn bind_background_host<'a>(
+        &'a self,
+        project: i64,
+        binding: &'a openwebide_core::scheduled::HostBinding,
+    ) -> LocalBoxFuture<'a, Result<(), String>> {
+        Box::pin(BackendApi::bind_background_host(self, project, binding))
     }
     fn scheduled_command<'a>(
         &'a self,

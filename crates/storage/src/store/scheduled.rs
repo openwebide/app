@@ -20,6 +20,41 @@ impl<D: Db> Store<D> {
     ) -> Result<Vec<ScheduledTask>, StorageError> {
         self.tasks_in_scope(user, project, None, now).await
     }
+    /// Owned monitor data projection. Reading it does not run scheduling/expiry policy.
+    pub async fn scheduled_monitors(
+        &self,
+        user: UserId,
+        session: i64,
+        now: i64,
+    ) -> Result<Vec<ScheduledTask>, StorageError> {
+        let project = self.get_session(session, user).await?.project_id;
+        self.tasks_in_scope(user, project, Some(session), now).await
+    }
+    /// A filesystem transport binding for unattended execution, shared with core goal workers.
+    pub async fn bind_background_host(
+        &self,
+        user: UserId,
+        project: i64,
+        binding: &HostBinding,
+    ) -> Result<(), StorageError> {
+        let project = self.get_project(project, user).await?;
+        if project.mode != WorkspaceMode::Local
+            || binding.host_id.is_empty()
+            || binding.host_id.len() > 256
+            || binding.path.is_empty()
+            || binding.path.len() > 4096
+        {
+            return Err(StorageError::InvalidRequest(
+                "Invalid project execution host binding".into(),
+            ));
+        }
+        self.set_user_setting(
+            user,
+            &format!("scheduled_host_{}", project.id),
+            &encode(binding)?,
+        )
+        .await
+    }
     async fn tasks_in_scope(
         &self,
         user: UserId,
