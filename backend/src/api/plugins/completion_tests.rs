@@ -102,6 +102,7 @@ fn completion_authority_is_checked_before_model_access_in_both_modes() {
                 .issue_plugin_context_grant(
                     user,
                     &openwebide_core::plugins::execution::PluginExecutionContext {
+                        user_action: false,
                         project_id: Some(project),
                         session_id: None,
                         primary: None,
@@ -199,6 +200,7 @@ fn completion_authority_is_checked_before_model_access_in_both_modes() {
                 .unwrap();
             let state = AppState { store };
             let context = openwebide_core::plugins::execution::PluginExecutionContext {
+                user_action: false,
                 project_id: Some(project),
                 session_id: None,
                 primary: None,

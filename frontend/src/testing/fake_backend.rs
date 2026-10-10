@@ -56,10 +56,21 @@ type SettingsLoad = futures::channel::oneshot::Receiver<Result<BTreeMap<String, 
 
 #[derive(Default)]
 pub struct FakeBackend {
+    pub bridge_credential: RefCell<Option<(String, i64)>>,
     pub marketplaces: RefCell<openwebide_core::plugins::marketplace::MarketplaceSettings>,
     pub marketplace_results:
         RefCell<VecDeque<Deferred<openwebide_core::plugins::marketplace::MarketplaceRefresh>>>,
     pub plugin_packages: RefCell<VecDeque<Deferred<openwebide_core::plugins::PluginPackage>>>,
+    pub plugin_authorities: RefCell<
+        BTreeMap<
+            String,
+            (
+                openwebide_core::plugins::execution::PluginExecutionContext,
+                openwebide_core::plugins::PreparedPlugin,
+            ),
+        >,
+    >,
+    pub plugin_actors: RefCell<BTreeMap<String, openwebide_core::plugins::execution::InvokePlugin>>,
     pub plugin_commands: RefCell<Vec<(i64, openwebide_core::plugins::ProjectPluginCommand)>>,
     pub project_plugin_entries:
         RefCell<BTreeMap<i64, Vec<openwebide_core::plugins::ProjectPlugin>>>,
@@ -276,6 +287,198 @@ impl Backend for FakeBackend {
             })
         })
     }
+    fn plugin_context_grants<'a>(
+        &'a self,
+        request: &'a openwebide_core::plugins::execution::PluginGrantRequest,
+    ) -> LocalBoxFuture<'a, Result<BTreeMap<String, String>, String>> {
+        Box::pin(async move {
+            self.calls.borrow_mut().push(Call::Request {
+                method: "plugin_context_grants",
+            });
+            let mut grants = BTreeMap::new();
+            for plugin in &request.plugins {
+                if !self
+                    .project_plugin_entries
+                    .borrow()
+                    .get(&request.context.project_id.unwrap_or(0))
+                    .is_some_and(|bindings| {
+                        bindings.iter().any(|binding| {
+                            binding.enabled && binding.prepared.digest == plugin.digest
+                        })
+                    })
+                {
+                    return Err("Plugin is no longer enabled".into());
+                }
+                let token = format!("grant-{}", self.plugin_authorities.borrow().len());
+                self.plugin_authorities
+                    .borrow_mut()
+                    .insert(token.clone(), (request.context.clone(), plugin.clone()));
+                grants.insert(plugin.digest.clone(), token);
+            }
+            Ok(grants)
+        })
+    }
+    fn start_plugin_invocation<'a>(
+        &'a self,
+        request: &'a openwebide_core::plugins::execution::PluginStartRequest,
+    ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::execution::PluginInvocation, String>>
+    {
+        Box::pin(async move {
+            use openwebide_core::plugins::execution::*;
+            self.calls.borrow_mut().push(Call::Request {
+                method: "start_plugin_invocation",
+            });
+            let id = format!("actor-{}", self.calls.borrow().len());
+            self.plugin_actors
+                .borrow_mut()
+                .insert(id.clone(), request.call.clone());
+            Ok(PluginInvocation {
+                id,
+                step: PluginStep::Ready,
+            })
+        })
+    }
+    fn continue_plugin_invocation<'a>(
+        &'a self,
+        request: &'a openwebide_core::plugins::execution::ContinuePlugin,
+    ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::execution::PluginInvocation, String>>
+    {
+        Box::pin(async move {
+            use openwebide_core::plugins::execution::*;
+            self.calls.borrow_mut().push(Call::Request {
+                method: "continue_plugin_invocation",
+            });
+            let call = self
+                .plugin_actors
+                .borrow()
+                .get(&request.id)
+                .cloned()
+                .ok_or("Missing actor")?;
+            let step = if request.sequence == 0 {
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).map_err(|error| error.to_string())?;
+                let action = call
+                    .name
+                    .strip_prefix("memory_")
+                    .ok_or("Unknown fixture tool")?;
+                let value = serde_json::json!({"title":args["title"],"content":args["content"],"auto_title":args["auto_title"]});
+                let operation = match action {
+                    "create" => serde_json::json!({"action":action,"value":value}),
+                    "update" => {
+                        serde_json::json!({"action":action,"id":args["id"],"revision":args["revision"],"value":value})
+                    }
+                    _ => {
+                        serde_json::json!({"action":action,"id":args["id"],"revision":args["revision"]})
+                    }
+                };
+                PluginStep::HostCall {
+                    sequence: 1,
+                    capability: "collections".into(),
+                    payload: serde_json::json!({"collection":"memories","operation":operation})
+                        .to_string(),
+                }
+            } else {
+                self.plugin_actors.borrow_mut().remove(&request.id);
+                match &request.response {
+                    Ok(content) => PluginStep::Complete {
+                        ok: true,
+                        content: content.clone(),
+                        summary: "Stored".into(),
+                    },
+                    Err(error) => PluginStep::Complete {
+                        ok: false,
+                        content: error.clone(),
+                        summary: "Failed".into(),
+                    },
+                }
+            };
+            Ok(PluginInvocation {
+                id: request.id.clone(),
+                step,
+            })
+        })
+    }
+    fn cancel_plugin_invocation<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> LocalBoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.calls.borrow_mut().push(Call::Request {
+                method: "cancel_plugin_invocation",
+            });
+            self.plugin_actors.borrow_mut().remove(id);
+            Ok(())
+        })
+    }
+    fn plugin_context_host_request<'a>(
+        &'a self,
+        request: &'a openwebide_core::plugins::execution::PluginHostRequest,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            use openwebide_core::plugins::records::RecordOperation;
+            self.calls.borrow_mut().push(Call::Request {
+                method: "plugin_context_host_request",
+            });
+            let (scope, _) = self
+                .plugin_authorities
+                .borrow()
+                .get(&request.grant)
+                .cloned()
+                .ok_or("Missing grant")?;
+            let project = scope.project_id.ok_or("Missing project")?;
+            let command: openwebide_core::plugins::records::RecordRequest =
+                serde_json::from_str(&request.payload).map_err(|error| error.to_string())?;
+            let pending = self.memory_command_results.borrow_mut().pop_front();
+            if let Some(pending) = pending {
+                pending.await.map_err(|error| error.to_string())??;
+            }
+            let mut all = self.memories.borrow_mut();
+            let data = all.entry(project).or_default();
+            if !data.enabled && !scope.user_action {
+                return Err("Memory is disabled".into());
+            }
+            match command.operation {
+                RecordOperation::Create { value } => {
+                    data.entries.insert(
+                        0,
+                        openwebide_core::ProjectMemory {
+                            id: data.entries.iter().map(|entry| entry.id).max().unwrap_or(0) + 1,
+                            revision: 1,
+                            updated_at: 0,
+                            title: value["title"].as_str().unwrap_or_default().into(),
+                            content: value["content"].as_str().unwrap_or_default().into(),
+                            auto_title: value["auto_title"].as_bool().unwrap_or(false),
+                        },
+                    );
+                }
+                RecordOperation::Update {
+                    id,
+                    revision,
+                    value,
+                } => {
+                    let entry = data
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.id == id && entry.revision == revision)
+                        .ok_or("Memory changed. Refresh before editing.")?;
+                    entry.title = value["title"].as_str().unwrap_or_default().into();
+                    entry.content = value["content"].as_str().unwrap_or_default().into();
+                    entry.auto_title = value["auto_title"].as_bool().unwrap_or(false);
+                    entry.revision += 1;
+                }
+                RecordOperation::Delete { id, revision } => {
+                    let index = data
+                        .entries
+                        .iter()
+                        .position(|entry| entry.id == id && entry.revision == revision)
+                        .ok_or("Memory changed. Refresh before deleting.")?;
+                    data.entries.remove(index);
+                }
+                _ => {}
+            }
+            Ok(serde_json::json!({"enabled":true,"records":[],"next":null}).to_string())
+        })
+    }
     fn project_plugins(
         &self,
         project: i64,
@@ -369,7 +572,13 @@ impl Backend for FakeBackend {
             if let Some(pending) = pending {
                 return pending.await.map_err(|error| error.to_string())?;
             }
-            Err("No plugin fixture prepared".into())
+            self.project_plugin_entries
+                .borrow()
+                .values()
+                .flatten()
+                .find(|binding| binding.prepared.source == *source)
+                .map(|binding| binding.prepared.clone())
+                .ok_or_else(|| "No plugin fixture prepared".into())
         })
     }
     fn record_plugin<'a>(
@@ -546,7 +755,10 @@ impl Backend for FakeBackend {
             self.calls.borrow_mut().push(Call::Request {
                 method: "bridge_token",
             });
-            Err("bridge_token has no scripted response".into())
+            self.bridge_credential
+                .borrow()
+                .clone()
+                .ok_or_else(|| "bridge_token has no scripted response".into())
         })
     }
     fn health<'a>(&'a self) -> LocalBoxFuture<'a, Result<Health, String>> {

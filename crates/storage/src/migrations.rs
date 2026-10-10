@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 48;
+pub const SCHEMA_VERSION: i64 = 49;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -503,14 +503,21 @@ async fn apply_step<D: Db>(
         48 => {
             db.execute("DROP TRIGGER IF EXISTS delete_project_plugin_grants", &[])
                 .await?;
-            db.execute("CREATE TABLE IF NOT EXISTS plugin_execution_grants_context (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, prepared TEXT NOT NULL, expires_at INTEGER NOT NULL, primary_model TEXT)", &[]).await?;
-            let columns = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='primary_model'", &[]).await?;
-            let copy = if columns.rows.is_empty() {
-                "INSERT OR IGNORE INTO plugin_execution_grants_context(token,user_id,session_id,project_scope,prepared,expires_at) SELECT token,user_id,session_id,project_scope,prepared,expires_at FROM plugin_execution_grants"
+            // This unreleased rebuild also preserves the action marker on replay.
+            db.execute("CREATE TABLE IF NOT EXISTS plugin_execution_grants_context (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, prepared TEXT NOT NULL, expires_at INTEGER NOT NULL, primary_model TEXT, user_action INTEGER NOT NULL DEFAULT 0)", &[]).await?;
+            let primary = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='primary_model'", &[]).await?;
+            let action = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='user_action'", &[]).await?;
+            let primary = if primary.rows.is_empty() {
+                "NULL"
             } else {
-                "INSERT OR IGNORE INTO plugin_execution_grants_context SELECT token,user_id,session_id,project_scope,prepared,expires_at,primary_model FROM plugin_execution_grants"
+                "primary_model"
             };
-            db.execute(copy, &[]).await?;
+            let action = if action.rows.is_empty() {
+                "0"
+            } else {
+                "user_action"
+            };
+            db.execute(&format!("INSERT OR IGNORE INTO plugin_execution_grants_context SELECT token,user_id,session_id,project_scope,prepared,expires_at,{primary},{action} FROM plugin_execution_grants"), &[]).await?;
             db.execute("DROP TABLE plugin_execution_grants", &[])
                 .await?;
             db.execute(
@@ -520,6 +527,13 @@ async fn apply_step<D: Db>(
             .await?;
             db.execute("CREATE INDEX IF NOT EXISTS plugin_execution_grant_expiry ON plugin_execution_grants(expires_at)", &[]).await?;
             db.execute("CREATE TRIGGER IF NOT EXISTS delete_project_plugin_grants AFTER DELETE ON projects BEGIN DELETE FROM plugin_execution_grants WHERE project_scope=OLD.id; END", &[]).await?;
+            Ok(())
+        }
+        49 => {
+            let columns = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='user_action'", &[]).await?;
+            if columns.rows.is_empty() {
+                db.execute("ALTER TABLE plugin_execution_grants ADD COLUMN user_action INTEGER NOT NULL DEFAULT 0", &[]).await?;
+            }
             Ok(())
         }
         other => Err(StorageError::Db(format!("unknown migration step {other}"))),

@@ -18,6 +18,8 @@ pub struct PluginExecutionContext {
     pub project_id: Option<i64>,
     pub session_id: Option<i64>,
     pub primary: Option<crate::ModelSelection>,
+    #[serde(default)]
+    pub user_action: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,6 +87,14 @@ pub struct InvokePlugin {
     pub prepared: PreparedPlugin,
     pub name: String,
     pub arguments: String,
+}
+/// Authority stays in the transport envelope and never reaches plugin input.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginStartRequest {
+    pub grant: String,
+    pub session_id: Option<i64>,
+    pub call: InvokePlugin,
 }
 impl InvokePlugin {
     pub fn validate_event(&self) -> Result<(), String> {

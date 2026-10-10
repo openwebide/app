@@ -66,6 +66,9 @@ enum Route {
     PluginHostRequest,
     PluginContextGrants,
     PluginContextHostRequest,
+    PluginStartInvocation,
+    PluginContinueInvocation,
+    PluginCancelInvocation,
     ListProjects,
     ListPlugins,
     ListMarketplaces,
@@ -235,6 +238,9 @@ fn resolve(method: &str, segments: &[&str]) -> Option<Route> {
         }
         ("POST", ["plugins", "execution-grants"]) => Some(Route::PluginContextGrants),
         ("POST", ["plugins", "host"]) => Some(Route::PluginContextHostRequest),
+        ("POST", ["plugins", "invoke"]) => Some(Route::PluginStartInvocation),
+        ("POST", ["plugins", "continue"]) => Some(Route::PluginContinueInvocation),
+        ("POST", ["plugins", "cancel"]) => Some(Route::PluginCancelInvocation),
         ("POST", ["sessions", id, "plugin-host"]) if numeric_id(id) => {
             Some(Route::PluginHostRequest)
         }
@@ -502,6 +508,15 @@ pub async fn route(req: Request) -> JsonResp {
         }
         (Some(Route::PluginContextHostRequest), Some(user)) => {
             api::plugins::context_host_request(req, &state, user).await
+        }
+        (Some(Route::PluginStartInvocation), Some(user)) => {
+            api::plugins::start_invocation(req, &state, user).await
+        }
+        (Some(Route::PluginContinueInvocation), Some(user)) => {
+            api::plugins::continue_invocation(req, &state, user).await
+        }
+        (Some(Route::PluginCancelInvocation), Some(user)) => {
+            api::plugins::cancel_invocation(req, &state, user).await
         }
         (Some(Route::GetProjectSkills), Some(user)) => {
             api::skills::get(&state, &path, user, false).await
@@ -1015,6 +1030,9 @@ mod tests {
                 Route::PluginHostRequest,
                 Route::PluginContextGrants,
                 Route::PluginContextHostRequest,
+                Route::PluginStartInvocation,
+                Route::PluginContinueInvocation,
+                Route::PluginCancelInvocation,
                 Route::GetProjectSkills,
                 Route::ProjectSkillCommand,
                 Route::GetSessionSkills,
@@ -1078,6 +1096,9 @@ mod tests {
                 Route::PluginContextGrants,
             ),
             ("POST", "plugins/host", Route::PluginContextHostRequest),
+            ("POST", "plugins/invoke", Route::PluginStartInvocation),
+            ("POST", "plugins/continue", Route::PluginContinueInvocation),
+            ("POST", "plugins/cancel", Route::PluginCancelInvocation),
             ("GET", "projects/5/memories", Route::GetProjectMemories),
             ("POST", "projects/5/memories", Route::ProjectMemoryCommand),
             ("GET", "sessions/5/memories", Route::GetSessionMemories),

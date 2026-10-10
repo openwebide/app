@@ -324,97 +324,6 @@ impl BrowserBridgeClient {
     pub fn cwd(&self) -> &str {
         &self.cwd
     }
-    async fn plugin_request<T: serde::de::DeserializeOwned>(
-        &self,
-        operation: &str,
-        payload: serde_json::Value,
-    ) -> Result<T, String> {
-        if operation != "cancel" && !self.cwd_verified() {
-            return Err("Reconnect this project's execution host first.".into());
-        }
-        let token = self.credentials.credential().await?;
-        let guard = crate::api::CommandFetchGuard(
-            web_sys::AbortController::new().map_err(|error| format!("{error:?}"))?,
-        );
-        let response =
-            gloo_net::http::Request::post(&format!("{}/plugins/{operation}", self.http_url))
-                .abort_signal(Some(&guard.0.signal()))
-                .header("Content-Type", "application/json")
-                .header("Authorization", &format!("Bearer {token}"))
-                .body(payload.to_string())
-                .map_err(|error| error.to_string())?
-                .send()
-                .await
-                .map_err(|error| format!("Plugin host unavailable: {error}"))?;
-        if !response.ok() {
-            return Err(format!(
-                "Plugin host HTTP {}: {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ));
-        }
-        response.json().await.map_err(|error| error.to_string())
-    }
-    pub async fn prepare_plugin(
-        &self,
-        source: &openwebide_core::plugins::PluginSource,
-    ) -> Result<openwebide_core::plugins::PreparedPlugin, String> {
-        if !self.cwd_verified() {
-            return Err("Reconnect this project's execution host first.".into());
-        }
-        let token = self.credentials.credential().await?;
-        let guard = crate::api::CommandFetchGuard(
-            web_sys::AbortController::new().map_err(|error| format!("{error:?}"))?,
-        );
-        let response = gloo_net::http::Request::post(&format!("{}/plugins/prepare", self.http_url))
-            .abort_signal(Some(&guard.0.signal()))
-            .header("Content-Type", "application/json")
-            .header("Authorization", &format!("Bearer {token}"))
-            .body(serde_json::json!({"source":source}).to_string())
-            .map_err(|error| error.to_string())?
-            .send()
-            .await
-            .map_err(|error| format!("Plugin host unavailable: {error}"))?;
-        if !response.ok() {
-            return Err(format!(
-                "Plugin host HTTP {}: {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ));
-        }
-        response.json().await.map_err(|error| error.to_string())
-    }
-
-    pub async fn plugin_package(
-        &self,
-        expected: &openwebide_core::plugins::PreparedPlugin,
-    ) -> Result<openwebide_core::plugins::PluginPackage, String> {
-        if !self.cwd_verified() {
-            return Err("Reconnect this project's execution host first.".into());
-        }
-        let token = self.credentials.credential().await?;
-        let guard = crate::api::CommandFetchGuard(
-            web_sys::AbortController::new().map_err(|error| format!("{error:?}"))?,
-        );
-        let response = gloo_net::http::Request::post(&format!("{}/plugins/package", self.http_url))
-            .abort_signal(Some(&guard.0.signal()))
-            .header("Content-Type", "application/json")
-            .header("Authorization", &format!("Bearer {token}"))
-            .body(serde_json::json!({"prepared":expected}).to_string())
-            .map_err(|error| error.to_string())?
-            .send()
-            .await
-            .map_err(|error| format!("Plugin host unavailable: {error}"))?;
-        if !response.ok() {
-            return Err(format!(
-                "Plugin host HTTP {}: {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ));
-        }
-        response.json().await.map_err(|error| error.to_string())
-    }
-
     fn git_cwd(&self) -> &str {
         if self.cwd.is_empty() { "." } else { &self.cwd }
     }
@@ -966,6 +875,7 @@ pub async fn run_local_agent(
         },
     );
     let plugin_context = openwebide_core::plugins::execution::PluginExecutionContext {
+        user_action: false,
         project_id: Some(project.id),
         session_id: Some(session_id),
         primary: runtime
@@ -979,10 +889,10 @@ pub async fn run_local_agent(
             }),
     };
     let planning_api = api.with_value(Clone::clone);
-    let plugin_transport = BrowserPluginTransport(
-        host.as_ref()
-            .and_then(crate::project_host::ProjectExecution::local_bridge),
-    );
+    let plugin_bridge = project_host
+        .plugin_host(Some(project.id), current.clone())?
+        .local_bridge();
+    let plugin_transport = BrowserPluginTransport(plugin_bridge.clone());
     let plan = openwebide_agent::session::plan_with_plugin_context(
         &runtime,
         input,
@@ -1125,6 +1035,7 @@ pub async fn run_local_agent(
             api: SendWrapper::new(api),
             vfs,
             bridge,
+            plugin_bridge,
             environment,
             session: session_id,
             anchor: anchor_id,
@@ -1391,7 +1302,7 @@ type BrowserBaseTaskExecutor = openwebide_agent::plugins::execution::PluginTools
     openwebide_agent::plugins::execution::GrantedServices<BrowserPluginServices>,
 >;
 #[derive(Clone)]
-struct BrowserPluginTransport(Option<BrowserBridgeClient>);
+struct BrowserPluginTransport(Option<crate::plugin_bridge::PluginBridgeClient>);
 impl openwebide_agent::plugins::execution::PluginTransport for BrowserPluginTransport {
     async fn start(
         &self,
@@ -1458,6 +1369,7 @@ struct BrowserTaskFactory {
     api: SendWrapper<Api>,
     vfs: BrowserFsaVfs,
     bridge: Option<BrowserBridgeClient>,
+    plugin_bridge: Option<crate::plugin_bridge::PluginBridgeClient>,
     environment: openwebide_core::RunEnvironment,
     session: i64,
     anchor: i64,
@@ -1478,7 +1390,7 @@ impl BrowserTaskFactory {
     fn base_executor(&self) -> BrowserBaseTaskExecutor {
         openwebide_agent::plugins::execution::PluginTools {
             executor: self.builtin_executor(),
-            transport: BrowserPluginTransport(self.bridge.clone()),
+            transport: BrowserPluginTransport(self.plugin_bridge.clone()),
             services: openwebide_agent::plugins::execution::GrantedServices {
                 grants: self.plugin_grants.clone(),
                 host: BrowserPluginServices {

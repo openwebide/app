@@ -398,8 +398,8 @@ and the agent can manage, without requiring changes to the app for each new
 capability.
 
 - Connect declared SDK event callbacks to durable job delivery and run completion.
-  Route UI and background invocations through the sessionless execution-context
-  API, including host selection, cancellation and stale-result checks.
+  Route remaining UI and background invocations through the sessionless
+  execution-context API; Memory mutations already use shared guarded actions.
 - Extend authenticated, run-pinned private record callbacks with shared collection
   adapters beyond the existing Memory and Skills data adapters, job and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and
@@ -410,7 +410,9 @@ capability.
   complete install/run/update lifecycle through both host adapters.
 - Complete installation and run verification of the plugin-owned Web, Memory and
   Skill Authoring sources. Route existing Memory UI automatic naming through its
-  plugin-owned completion workflow. Replace the transitional Scheduling tool-group
+  plugin-owned completion workflow through a deployed executable default. Verify
+  cold-cache preparation on paired hosts without requiring workspace mapping.
+  Replace the transitional Scheduling tool-group
   feature switch with a plugin-owned implementation and retire legacy dispatch.
   Require the same public SDK, interfaces and privileges as community plugins:
   no first-party identity dispatch, built-in feature proxy or fallback. Keep host

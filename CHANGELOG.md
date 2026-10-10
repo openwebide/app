@@ -9,7 +9,11 @@ for what's still ahead.
 
 ## [Unreleased]
 
-- Add authenticated plugin execution contexts without chat sessions, sharing project records and collection callbacks with chat runs. Pin selected primary models in local and remote run grants; UI action routing and durable job delivery remain in progress.
+- Route Memory UI mutations through declared executable-plugin actions, sharing grants, validation, cancellation and stale-result guards with agent execution. Preserve explicit manual editing while automatic Memory context is disabled. Executable defaults and deployment remain in progress.
+
+- Select paired plugin hosts independently of local workspace folder mapping, allowing plugin installation and execution when only the browser can access the project folder. Command and Git operations retain their existing mapping checks.
+
+- Add authenticated plugin execution contexts without chat sessions, sharing project records and collection callbacks with chat runs. Pin selected primary models in local and remote run grants; durable job delivery remains in progress.
 
 - Add declared Rust SDK event handlers through the shared host invocation workflow, with manifest/export matching, bounded payloads and normal capability grants. Durable scheduling and background delivery remain in progress.
 

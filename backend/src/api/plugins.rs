@@ -33,21 +33,9 @@ impl<'a> PlanningHost<'a> {
     async fn send<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
-        mut body: serde_json::Value,
+        body: serde_json::Value,
     ) -> Result<T, String> {
-        body["user"] = json!(self.user.get());
-        let (status, response) = crate::bridge::send(self.store(), path, body.to_string())
-            .await
-            .map_err(|error| {
-                let error = ApiError::from(error);
-                error.log_for_route("POST", path);
-                error.public_message().to_owned()
-            })?;
-        if status != 200 {
-            return Err("Plugin execution host request failed".into());
-        }
-        serde_json::from_slice(&response)
-            .map_err(|_| "Plugin execution host returned an invalid response".into())
+        send_plugin_rpc(self.store(), self.user, path, body).await
     }
     pub async fn flush_cancelled(&self) {
         let ids = std::mem::take(&mut *self.cancelled.lock().unwrap());
@@ -57,6 +45,26 @@ impl<'a> PlanningHost<'a> {
                 .await;
         }
     }
+}
+async fn send_plugin_rpc<T: serde::de::DeserializeOwned>(
+    store: &openwebide_storage::Store<crate::state::AppDb>,
+    user: UserId,
+    path: &str,
+    mut body: serde_json::Value,
+) -> Result<T, String> {
+    body["user"] = json!(user.get());
+    let (status, response) = crate::bridge::send(store, path, body.to_string())
+        .await
+        .map_err(|error| {
+            let error = ApiError::from(error);
+            error.log_for_route("POST", path);
+            error.public_message().to_owned()
+        })?;
+    if status != 200 {
+        return Err("Plugin execution host request failed".into());
+    }
+    serde_json::from_slice(&response)
+        .map_err(|_| "Plugin execution host returned an invalid response".into())
 }
 impl PlanningHost<'static> {
     pub fn owned(
@@ -157,6 +165,66 @@ async fn execute_host_request(
     }
 }
 
+pub(crate) async fn start_invocation(
+    req: Request,
+    state: &AppState,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    let input: openwebide_core::plugins::execution::PluginStartRequest =
+        parse_json(read_body(req, 5 * 1024 * 1024).await?)?;
+    state
+        .store
+        .authorize_plugin_invocation(user.id, &input, now())
+        .await?;
+    let result: openwebide_core::plugins::execution::PluginInvocation = send_plugin_rpc(
+        &state.store,
+        user.id,
+        "/plugins/invoke",
+        json!({"call":input.call}),
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok(json_response(200, &result))
+}
+pub(crate) async fn continue_invocation(
+    req: Request,
+    state: &AppState,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    let input: openwebide_core::plugins::execution::ContinuePlugin =
+        parse_json(read_body(req, 5 * 1024 * 1024).await?)?;
+    let result: openwebide_core::plugins::execution::PluginInvocation = send_plugin_rpc(
+        &state.store,
+        user.id,
+        "/plugins/continue",
+        json!({"continuation":input}),
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok(json_response(200, &result))
+}
+pub(crate) async fn cancel_invocation(
+    req: Request,
+    state: &AppState,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        id: String,
+    }
+    let input: Input = parse_json(read_body(req, 4096).await?)?;
+    let result: serde_json::Value = send_plugin_rpc(
+        &state.store,
+        user.id,
+        "/plugins/cancel",
+        json!({"id":input.id}),
+    )
+    .await
+    .map_err(ApiError::bad_request)?;
+    Ok(json_response(200, &result))
+}
+
 pub(crate) async fn execution_grants(
     state: &AppState,
     user: UserId,
@@ -168,6 +236,7 @@ pub(crate) async fn execution_grants(
         state,
         user,
         &openwebide_core::plugins::execution::PluginExecutionContext {
+            user_action: false,
             project_id: current.project_id,
             session_id: Some(session),
             primary: None,

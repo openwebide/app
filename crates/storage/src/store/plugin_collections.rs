@@ -36,6 +36,7 @@ impl<D: Db> Store<D> {
         &self,
         user: UserId,
         project: Option<i64>,
+        user_action: bool,
         request: &RecordRequest,
         now: i64,
     ) -> Result<CollectionResult, StorageError> {
@@ -51,7 +52,7 @@ impl<D: Db> Store<D> {
             .map_err(StorageError::InvalidRequest)?;
         if request.collection == "skills" {
             return self
-                .plugin_skills_in_transaction(user, project, request, now)
+                .plugin_skills_in_transaction(user, project, user_action, request, now)
                 .await;
         }
         if request.collection != "memories" {
@@ -75,11 +76,12 @@ impl<D: Db> Store<D> {
             ));
         };
         self.get_project(project, user).await?;
-        let enabled = self
-            .get_user_setting(user, &format!("project_memory_{project}"))
-            .await?
-            .as_deref()
-            != Some("false");
+        let enabled = user_action
+            || self
+                .get_user_setting(user, &format!("project_memory_{project}"))
+                .await?
+                .as_deref()
+                != Some("false");
         if !enabled {
             if !matches!(
                 request.operation,

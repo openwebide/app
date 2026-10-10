@@ -77,10 +77,6 @@ impl TestState {
         provide_context(skill_actions);
         let memories = openwebide_frontend::state::memories::MemoriesState::new();
         provide_context(memories);
-        let memory_actions = openwebide_frontend::project_memory::ProjectMemoryActions::new(
-            api, memories, auth, projects, chat,
-        );
-        provide_context(memory_actions);
         let session_management =
             openwebide_frontend::state::sessions::SessionsState::new(chat, projects.active_project);
         provide_context(session_management);
@@ -91,6 +87,15 @@ impl TestState {
             settings,
             expect_context::<AuthState>(),
         ));
+        let memory_actions = openwebide_frontend::project_memory::ProjectMemoryActions::new(
+            api,
+            memories,
+            auth,
+            projects,
+            chat,
+            expect_context::<openwebide_frontend::project_host::ProjectHost>(),
+        );
+        provide_context(memory_actions);
         let plugins = openwebide_frontend::state::plugins::PluginsState::default();
         provide_context(plugins);
         provide_context(
@@ -164,6 +169,38 @@ impl TestState {
                 enabled: true,
             }],
         );
+    }
+
+    pub fn seed_memory_plugin(&self) -> openwebide_core::plugins::PreparedPlugin {
+        use openwebide_core::plugins::{PluginTool, ProjectPlugin, RustPlugin};
+        let mut prepared = openwebide_core::plugins::testing::receipt();
+        prepared.manifest.compatibility.plugin_api = 3;
+        prepared.manifest.contributions.skills.clear();
+        prepared.manifest.contributions.tools = ["memory_create", "memory_update", "memory_delete"]
+            .into_iter()
+            .map(|name| PluginTool {
+                name: name.into(),
+                description: "Host memory fixture".into(),
+                parameters: serde_json::json!({"type":"object"}),
+                requires_approval: true,
+            })
+            .collect();
+        prepared.manifest.executable = Some(RustPlugin {
+            manifest: "Cargo.toml".into(),
+            library: "memory_fixture".into(),
+            sdk_version: "0.1.0".into(),
+            capabilities: vec!["collections".into()],
+        });
+        self.fake.project_plugin_entries.borrow_mut().insert(
+            1,
+            vec![ProjectPlugin {
+                id: 1,
+                revision: 1,
+                enabled: true,
+                prepared: prepared.clone(),
+            }],
+        );
+        prepared
     }
 
     pub fn seed_connection(&self) {

@@ -15,15 +15,18 @@ impl<D: Db> Store<D> {
         &self,
         user: UserId,
         project: Option<i64>,
+        user_action: bool,
         request: &RecordRequest,
         now: i64,
     ) -> Result<CollectionResult, StorageError> {
         let enabled = if let Some(project) = project {
             self.get_project(project, user).await?;
-            self.get_user_setting(user, &format!("project_skills_{project}"))
-                .await?
-                .as_deref()
-                != Some("false")
+            user_action
+                || self
+                    .get_user_setting(user, &format!("project_skills_{project}"))
+                    .await?
+                    .as_deref()
+                    != Some("false")
         } else {
             false
         };

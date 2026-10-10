@@ -79,30 +79,9 @@ impl<D: Db> Store<D> {
         request: &PluginHostRequest,
         now: i64,
     ) -> Result<(PreparedPlugin, PluginExecutionContext), StorageError> {
-        let grant = self.db.execute("SELECT prepared,project_scope,session_id,primary_model FROM plugin_execution_grants WHERE token=? AND user_id=? AND expires_at>?", &[
-            DbValue::Text(request.grant.clone()), DbValue::Int(user.get()), DbValue::Int(now),
-        ]).await?;
-        let row = grant
-            .rows
-            .first()
-            .ok_or_else(|| StorageError::NotFound("Plugin execution grant".into()))?;
-        let grant_session = row.get_int_opt(2);
-        if session != grant_session {
-            return Err(StorageError::NotFound("Plugin execution grant".into()));
-        }
-        let project = row.get_int(1)?;
-        let context = PluginExecutionContext {
-            project_id: (project != 0).then_some(project),
-            session_id: grant_session,
-            primary: row
-                .get_text_opt(3)
-                .map(serde_json::from_str)
-                .transpose()
-                .map_err(|error| StorageError::Db(error.to_string()))?,
-        };
-        self.validate_plugin_context(user, &context).await?;
-        let plugin: PreparedPlugin = serde_json::from_str(row.get_text(0)?)
-            .map_err(|error| StorageError::Db(error.to_string()))?;
+        let (plugin, context) = self
+            .plugin_grant_in_transaction(user, session, &request.grant, now)
+            .await?;
         if !plugin
             .manifest
             .executable
@@ -114,6 +93,78 @@ impl<D: Db> Store<D> {
             ));
         }
         Ok((plugin, context))
+    }
+    async fn plugin_grant_in_transaction(
+        &self,
+        user: UserId,
+        session: Option<i64>,
+        grant: &str,
+        now: i64,
+    ) -> Result<(PreparedPlugin, PluginExecutionContext), StorageError> {
+        let grant = self.db.execute("SELECT prepared,project_scope,session_id,primary_model,user_action FROM plugin_execution_grants WHERE token=? AND user_id=? AND expires_at>?", &[
+            DbValue::Text(grant.to_owned()), DbValue::Int(user.get()), DbValue::Int(now),
+        ]).await?;
+        let row = grant
+            .rows
+            .first()
+            .ok_or_else(|| StorageError::NotFound("Plugin execution grant".into()))?;
+        let grant_session = row.get_int_opt(2);
+        if session != grant_session {
+            return Err(StorageError::NotFound("Plugin execution grant".into()));
+        }
+        let project = row.get_int(1)?;
+        let context = PluginExecutionContext {
+            user_action: row.get_int(4)? != 0,
+            project_id: (project != 0).then_some(project),
+            session_id: grant_session,
+            primary: row
+                .get_text_opt(3)
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| StorageError::Db(error.to_string()))?,
+        };
+        self.validate_plugin_context(user, &context).await?;
+        let plugin: PreparedPlugin = serde_json::from_str(row.get_text(0)?)
+            .map_err(|error| StorageError::Db(error.to_string()))?;
+        Ok((plugin, context))
+    }
+    /// Validate the start envelope against an issued version snapshot before
+    /// forwarding a new invocation to its execution host.
+    pub fn authorize_plugin_invocation<'a>(
+        &'a self,
+        user: UserId,
+        request: &'a openwebide_core::plugins::execution::PluginStartRequest,
+        now: i64,
+    ) -> ContextAuthorityFuture<'a> {
+        Box::pin(async move {
+            request
+                .call
+                .prepared
+                .validate()
+                .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+            request
+                .call
+                .validate_event()
+                .map_err(StorageError::InvalidRequest)?;
+            self.db
+                .transaction(|tx| async move {
+                    let store = Store::new(tx);
+                    let (plugin, context) = store
+                        .plugin_grant_in_transaction(user, request.session_id, &request.grant, now)
+                        .await?;
+                    let supplied = &request.call.prepared;
+                    if plugin.source != supplied.source
+                        || plugin.manifest != supplied.manifest
+                        || plugin.digest != supplied.digest
+                    {
+                        return Err(StorageError::Conflict(
+                            "Plugin invocation does not match its execution grant".into(),
+                        ));
+                    }
+                    Ok((plugin, context))
+                })
+                .await
+        })
     }
     async fn validate_plugin_context(
         &self,
@@ -151,6 +202,7 @@ impl<D: Db> Store<D> {
         self.issue_plugin_context_grant(
             user,
             &PluginExecutionContext {
+                user_action: false,
                 project_id,
                 session_id: Some(session),
                 primary: None,
@@ -198,12 +250,13 @@ impl<D: Db> Store<D> {
             }
             let expires = now.checked_add(86_400).ok_or_else(|| StorageError::InvalidRequest("Invalid grant expiry".into()))?;
             store.db.execute("DELETE FROM plugin_execution_grants WHERE expires_at<=?", &[DbValue::Int(now)]).await?;
-            store.db.execute("INSERT INTO plugin_execution_grants(token,user_id,session_id,project_scope,prepared,expires_at,primary_model) VALUES(?,?,?,?,?,?,?)", &[
+            store.db.execute("INSERT INTO plugin_execution_grants(token,user_id,session_id,project_scope,prepared,expires_at,primary_model,user_action) VALUES(?,?,?,?,?,?,?,?)", &[
                 DbValue::Text(token.into()), DbValue::Int(user.get()), context.session_id.map_or(DbValue::Null, DbValue::Int),
                 DbValue::Int(context.project_id.unwrap_or(0)),
                 DbValue::Text(serde_json::to_string(plugin).map_err(|error| StorageError::Db(error.to_string()))?), DbValue::Int(expires),
                 context.primary.as_ref().map(serde_json::to_string).transpose()
                     .map_err(|error| StorageError::Db(error.to_string()))?.map_or(DbValue::Null, DbValue::Text),
+                DbValue::Int(i64::from(context.user_action)),
             ]).await?;
             Ok(())
         }).await
@@ -261,6 +314,7 @@ impl<D: Db> Store<D> {
                                 .plugin_collections_in_transaction(
                                     user,
                                     context.project_id,
+                                    context.user_action,
                                     &command,
                                     now,
                                 )
@@ -363,6 +417,7 @@ mod tests {
             assert_eq!(
                 context,
                 PluginExecutionContext {
+                    user_action: false,
                     project_id: None,
                     session_id: Some(session),
                     primary: None
@@ -437,6 +492,7 @@ mod tests {
                     .await
                     .unwrap();
                 let context = PluginExecutionContext {
+                    user_action: false,
                     project_id: Some(project),
                     session_id: None,
                     primary: Some(openwebide_core::ModelSelection {
@@ -452,6 +508,79 @@ mod tests {
                 assert!(
                     store
                         .issue_plugin_context_grant(other, &context, &plugin, &"b".repeat(32), 2)
+                        .await
+                        .is_err()
+                );
+                let invocation = openwebide_core::plugins::execution::PluginStartRequest {
+                    grant: token.clone(),
+                    session_id: None,
+                    call: openwebide_core::plugins::execution::InvokePlugin {
+                        operation: openwebide_core::plugins::execution::PluginOperation::Tool,
+                        prepared: PreparedPlugin {
+                            host_id: "another-host".into(),
+                            ..plugin.clone()
+                        },
+                        name: "notes_add".into(),
+                        arguments: "{}".into(),
+                    },
+                };
+                assert_eq!(
+                    store
+                        .authorize_plugin_invocation(user, &invocation, 3)
+                        .await
+                        .unwrap()
+                        .1,
+                    context
+                );
+                assert!(
+                    store
+                        .authorize_plugin_invocation(other, &invocation, 3)
+                        .await
+                        .is_err()
+                );
+                let mut forged = invocation.clone();
+                forged
+                    .call
+                    .prepared
+                    .manifest
+                    .executable
+                    .as_mut()
+                    .unwrap()
+                    .capabilities
+                    .push("http".into());
+                assert!(
+                    store
+                        .authorize_plugin_invocation(user, &forged, 3)
+                        .await
+                        .is_err()
+                );
+                forged = invocation.clone();
+                forged.session_id = Some(session);
+                assert!(
+                    store
+                        .authorize_plugin_invocation(user, &forged, 3)
+                        .await
+                        .is_err()
+                );
+                forged = invocation.clone();
+                forged.call.prepared.source.commit = "f".repeat(40);
+                assert!(
+                    store
+                        .authorize_plugin_invocation(user, &forged, 3)
+                        .await
+                        .is_err()
+                );
+                forged = invocation.clone();
+                forged.call.prepared.digest = "f".repeat(64);
+                assert!(
+                    store
+                        .authorize_plugin_invocation(user, &forged, 3)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .authorize_plugin_invocation(user, &invocation, 86_402)
                         .await
                         .is_err()
                 );
@@ -490,6 +619,70 @@ mod tests {
                         .entries
                         .len(),
                     1
+                );
+                // Disabling agent context must not prevent explicit UI management.
+                store
+                    .set_user_setting(user, &format!("project_memory_{project}"), "false")
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .plugin_context_host_request(user, &shared, 3)
+                        .await
+                        .is_err()
+                );
+                let action_context = PluginExecutionContext {
+                    user_action: true,
+                    ..context.clone()
+                };
+                let action_token = "7".repeat(32);
+                store
+                    .issue_plugin_context_grant(user, &action_context, &plugin, &action_token, 3)
+                    .await
+                    .unwrap();
+                let action_request = PluginHostRequest {
+                    grant: action_token.clone(),
+                    ..shared.clone()
+                };
+                store
+                    .plugin_context_host_request(user, &action_request, 3)
+                    .await
+                    .unwrap();
+                assert!(!store.project_memories(user, project).await.unwrap().enabled);
+                assert_eq!(
+                    store
+                        .project_memories(user, project)
+                        .await
+                        .unwrap()
+                        .entries
+                        .len(),
+                    2
+                );
+                // Scope is carried by the token, never accepted from plugin input.
+                let mut forged_action = shared.clone();
+                let mut forged_payload: serde_json::Value =
+                    serde_json::from_str(&forged_action.payload).unwrap();
+                forged_payload["user_action"] = json!(true);
+                forged_action.payload = forged_payload.to_string();
+                assert!(
+                    store
+                        .plugin_context_host_request(user, &forged_action, 3)
+                        .await
+                        .is_err()
+                );
+                store
+                    .db
+                    .execute("PRAGMA user_version=47", &[])
+                    .await
+                    .unwrap();
+                store.migrate().await.unwrap();
+                assert_eq!(
+                    store
+                        .authorize_plugin_context(user, &action_request, 3)
+                        .await
+                        .unwrap()
+                        .1,
+                    action_context
                 );
                 let (_, pinned) = store
                     .authorize_plugin_context(user, &private, 3)

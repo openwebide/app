@@ -160,7 +160,13 @@ configured; chat planners pin their selected model, including run overrides.
 Context grants and chat grants cannot be used through each other's callback
 endpoint. Existing active grants retain their pinned plugin version across
 updates or removal; new grants require the currently enabled installed version.
-Sessionless UI action routing and durable background delivery remain unfinished.
+Memory UI mutations use the same declared tool invocation policy as agent runs,
+with sessionless grants and no built-in behavior fallback. The explicit UI action
+grant permits manual editing while automatic Memory context is switched off;
+plugin code cannot opt itself into this authority. Plugins on a paired host do
+not require that host to see a local project's browser folder. Workspace commands
+and Git retain their separate folder mapping requirement. Durable background
+delivery and executable-default deployment remain unfinished.
 The separate `completion` grant exposes bounded text generation through the
 session's configured primary or fast model. Plugins supply prompts and interpret
 the results; the host supplies model selection and credentials. Inputs are limited

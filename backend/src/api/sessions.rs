@@ -505,6 +505,7 @@ pub(super) async fn build_run_plan(
         },
     );
     let plugin_context = openwebide_core::plugins::execution::PluginExecutionContext {
+        user_action: false,
         project_id: session.project_id,
         session_id: Some(session_id),
         primary: runtime

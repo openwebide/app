@@ -1200,6 +1200,24 @@ impl BackendApi {
     ) -> Result<String, String> {
         self.post("/plugins/host", request).await
     }
+    pub async fn start_plugin_invocation(
+        &self,
+        request: &openwebide_core::plugins::execution::PluginStartRequest,
+    ) -> Result<openwebide_core::plugins::execution::PluginInvocation, String> {
+        self.post("/plugins/invoke", request).await
+    }
+    pub async fn continue_plugin_invocation(
+        &self,
+        request: &openwebide_core::plugins::execution::ContinuePlugin,
+    ) -> Result<openwebide_core::plugins::execution::PluginInvocation, String> {
+        self.post("/plugins/continue", request).await
+    }
+    pub async fn cancel_plugin_invocation(&self, id: &str) -> Result<(), String> {
+        let _: serde_json::Value = self
+            .post("/plugins/cancel", &serde_json::json!({"id":id}))
+            .await?;
+        Ok(())
+    }
     pub async fn plugin_host_request(
         &self,
         session: i64,

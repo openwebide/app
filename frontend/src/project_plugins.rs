@@ -1,8 +1,8 @@
 //! Shared catalog, installation and activation workflows with thin host transports.
 use crate::{
     backend::Api,
-    local_agent::BrowserBridgeClient,
-    project_host::{ProjectExecution, ProjectHost},
+    plugin_bridge::PluginBridgeClient,
+    project_host::{PluginExecutionHost, ProjectHost},
     state::{
         auth::AuthState, chat::ChatState, plugins::PluginsState, projects::ProjectsState,
         settings::SettingsState,
@@ -13,7 +13,7 @@ use openwebide_core::plugins::{marketplace::*, *};
 
 enum PluginTransport {
     Remote(Api, Option<i64>),
-    Local(BrowserBridgeClient),
+    Local(PluginBridgeClient),
 }
 impl PluginTransport {
     async fn prepare(&self, source: &PluginSource) -> Result<PreparedPlugin, String> {
@@ -304,9 +304,11 @@ async fn run_operation(
                 .into_iter()
                 .filter(|entry| !entry.default_enabled)
             {
-                let transport = match host.resolve_guarded(project, true, current.clone()).await? {
-                    ProjectExecution::Remote { api, .. } => PluginTransport::Remote(api, project),
-                    ProjectExecution::Local(client) => PluginTransport::Local(client),
+                let transport = match host.plugin_host(project, current.clone())? {
+                    PluginExecutionHost::Remote { api, .. } => {
+                        PluginTransport::Remote(api, project)
+                    }
+                    PluginExecutionHost::Local(client) => PluginTransport::Local(client),
                 };
                 if !current() {
                     return Ok(());
@@ -426,12 +428,9 @@ async fn run_operation(
                     })
                     .map(|e| e.revision)
             });
-            let transport = match host
-                .resolve_guarded(Some(id), true, current.clone())
-                .await?
-            {
-                ProjectExecution::Remote { api, .. } => PluginTransport::Remote(api, Some(id)),
-                ProjectExecution::Local(client) => PluginTransport::Local(client),
+            let transport = match host.plugin_host(Some(id), current.clone())? {
+                PluginExecutionHost::Remote { api, .. } => PluginTransport::Remote(api, Some(id)),
+                PluginExecutionHost::Local(client) => PluginTransport::Local(client),
             };
             if !current() {
                 return Ok(());
@@ -540,9 +539,9 @@ async fn install_plugin(
             .cloned()
     });
     let revision = previous.as_ref().map(|entry| entry.revision);
-    let transport = match host.resolve_guarded(project, true, current.clone()).await? {
-        ProjectExecution::Remote { api, .. } => PluginTransport::Remote(api, project),
-        ProjectExecution::Local(client) => PluginTransport::Local(client),
+    let transport = match host.plugin_host(project, current.clone())? {
+        PluginExecutionHost::Remote { api, .. } => PluginTransport::Remote(api, project),
+        PluginExecutionHost::Local(client) => PluginTransport::Local(client),
     };
     if !current() {
         return Ok(());
