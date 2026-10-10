@@ -571,6 +571,105 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
             165,
         ))
         .unwrap();
+        // Seed a completed retention scan, then let the real background actor prune
+        // the two newly completed entries while preserving the task's latest failure.
+        let mut seed = services.clone();
+        let mut retained = Vec::new();
+        for index in 0..130 {
+            let value: Value = serde_json::from_str(&seed.request("collections",
+                &json!({"collection":"task_runs","operation":{"action":"create","value":{
+                    "key":format!("retention:{index}"),"task_id":failed_task.id,"due_at":100,
+                    "snapshot":{"status":"complete","detail":"Old completed occurrence"}
+                }}}).to_string()).unwrap()).unwrap();
+            retained.push(value["records"][0]["id"].as_i64().unwrap());
+        }
+        let recovery: Value = serde_json::from_str(
+            &seed
+                .request(
+                    "records",
+                    &json!({"collection":"recovery","operation":{"action":"list"}}).to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let recovery = &recovery["records"][0];
+        seed.request(
+            "records",
+            &json!({"collection":"recovery","operation":{"action":"update",
+                "id":recovery["id"],"revision":recovery["revision"],
+                "value":{"after":0,"history":{"after":retained[127],"recent":retained[..128]}}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        clock.store(220, Ordering::Relaxed);
+        let delivery = block_on(store.claim_plugin_jobs("host", 0, &"9".repeat(32), 220)).unwrap();
+        let delivery = delivery
+            .jobs
+            .iter()
+            .find(|job| job.job.event == "reconcile" && job.context.project_id == Some(project))
+            .unwrap();
+        block_on(store.issue_plugin_job_grant(
+            user,
+            "host",
+            delivery.job.id,
+            &delivery.lease,
+            &"0".repeat(32),
+            220,
+        ))
+        .unwrap();
+        let retention_services = Services {
+            grant: "0".repeat(32),
+            ..services.clone()
+        };
+        let result = runtime
+            .event(
+                &bytes,
+                retention_services.clone(),
+                capabilities,
+                EventInput {
+                    name: delivery.job.event.clone(),
+                    payload: delivery.job.payload.clone(),
+                },
+            )
+            .unwrap();
+        assert!(result.ok, "{}", result.content);
+        let mut readback = retention_services;
+        let remaining: Value = serde_json::from_str(
+            &readback
+                .request(
+                    "collections",
+                    &json!({"collection":"task_runs","operation":{"action":"list"}}).to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            remaining["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|record| record["id"] != retained[0] && record["id"] != retained[1])
+        );
+        assert!(
+            remaining["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|record| record["id"] == history["id"])
+        );
+        let newest: Value = serde_json::from_str(&readback.request("collections",
+            &json!({"collection":"task_runs","operation":{"action":"read","id":retained[129]}}).to_string()).unwrap()).unwrap();
+        assert_eq!(newest["records"][0]["value"]["key"], "retention:129");
+        block_on(store.finish_plugin_job(
+            "host",
+            delivery.job.id,
+            &delivery.lease,
+            true,
+            "Pruned old history through public SDK",
+            220,
+        ))
+        .unwrap();
         assert_eq!(prepared.manifest.compatibility.plugin_api, 3);
     }
 }

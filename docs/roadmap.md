@@ -406,9 +406,10 @@ capability.
   bindings project raw-run progress and retain terminal snapshots after cleanup.
   Declared background events now drive source-owned timer/run/deletion repair and
   source-version handoff, through current enabled bindings in both host modes. Terminal
-  callback snapshots repair failed completion deliveries after raw-run cleanup. Finish
-  source-owned retention
-  and complete cancellation/recovery verification,
+  callback snapshots repair failed completion deliveries after raw-run cleanup.
+  Source-owned history retention preserves recent, current, active and legacy results
+  through bounded scans. Finish terminal job/run cleanup, quota recovery and
+  cancellation/recovery verification,
   then activate the executable release. Task and monitor mutations now share guarded
   SDK actions with Memory; verify the deployed paired-host browser lifecycle and
   the compiled defaults before removing transitional built-in handlers.
