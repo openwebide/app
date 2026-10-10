@@ -191,13 +191,19 @@ mod tests {
                 )
                 .unwrap();
                 // Build scripts execute natively: prove isolation separately from WASM.
-            std::fs::write(root.path().join("private.txt"), "host-only sentinel").unwrap();
+            let secret = root.path().join("private.txt");
+            std::fs::write(&secret, "host-only sentinel").unwrap();
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let script = format!(r#"
                 fn main() {{
                     let source = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-                    assert!(std::fs::read(source.parent().unwrap().join("private.txt")).is_err(), "host read escaped build sandbox");
+                    assert!(std::fs::read({secret:?}).is_err(), "host read escaped build sandbox");
                     assert!(std::fs::write(source.join("mutation.txt"), "bad").is_err(), "immutable source was writable");
                     assert!(std::net::TcpStream::connect_timeout(&"{address}".parse().unwrap(), std::time::Duration::from_secs(1)).is_err(), "build network was available");
                 }}

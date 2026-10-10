@@ -154,8 +154,8 @@ use opaque run grants checked against the authenticated account, session, origin
 project and pinned plugin source/capabilities. Record collections persist across
 plugin updates and reinstalls, with revision checks, bounded pages and quotas.
 Grant tokens stay in host orchestration and are never passed to plugin code.
-Shared collection adapters, job and workspace callbacks, Linux installation
-verification and compiled offline defaults still need implementation. API 2
+Shared collection adapters, job and workspace callbacks, installation progress
+and cancellation, and compiled offline defaults still need implementation. API 2
 first-party plugins remain transitional.
 
 Both host adapters prepare plugin tools through the shared run planner before
@@ -164,6 +164,18 @@ advertised tool receives no execution grant. The installed version remains activ
 when a prepared update requests additional capabilities, including compatible
 automatic updates. The Plugins interface shows the additions for explicit review;
 approval applies only to that prepared version and installation revision.
+
+Source builds use a read-only source/SDK/toolchain and a separate writable work
+directory. Dependency retrieval is isolated too, with network access enabled only
+for retrieval. macOS uses its native sandbox; native Linux users use bubblewrap.
+Root Linux containers use the packaged `openwebide-plugin-build` launcher with a
+fresh unprivileged identity, fully enforced Landlock ABI 3, and a syscall filter.
+The ordinary Docker profile stays in place. Container kernels must support that
+Landlock ABI; compilation fails if the protections cannot be applied. The Docker
+image supplies the pinned toolchain in a location the isolated identity can read.
+The source-to-WASM/runtime contract runs in CI on macOS and in a default Linux
+container, including attempts to read host files, alter source metadata and use
+the network during compilation.
 
 Web's source reference implementation now lives in the plugins repository and
 uses only the public SDK HTTP primitive. Its API 3 release remains unlisted while

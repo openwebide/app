@@ -399,7 +399,7 @@ capability.
 
 - Extend authenticated, run-pinned private record callbacks with shared collection
   adapters, job and workspace primitives,
-  installation progress and cancellation, Linux container build isolation, and
+  installation progress and cancellation, production compiler-image verification, and
   offline compiled defaults. Marketplaces ship pinned Rust source and Cargo.lock;
   hosts compile against the declared SDK version and validate the WASM component
   before activation. Cache artifacts by source, SDK and toolchain. Publish the SDK

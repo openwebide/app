@@ -27,6 +27,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install native plugin compiler sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
       - name: Format check
         run: cargo fmt --all --check
 
@@ -41,7 +44,7 @@ jobs:
           OPENWEBIDE_TAILSCALE_HOST=openwebide.example.ts.net OPENWEBIDE_SERVE_CONFIG_DIR=/tmp/serve docker compose -f docker-compose.https.yml config --quiet
 
       - name: Clippy (native crates)
-        run: cargo clippy -p openwebide-core -p openwebide-llm -p openwebide-storage -p openwebide-agent -p openwebide-auth --features openwebide-core/editor-parser --all-targets -- -D warnings
+        run: cargo clippy -p openwebide-core -p openwebide-llm -p openwebide-storage -p openwebide-agent -p openwebide-auth -p openwebide-plugin-sdk -p openwebide-plugin-runtime -p openwebide-plugin-build --features openwebide-core/editor-parser --all-targets -- -D warnings
 
       - name: Clippy (backend, wasm32-wasip2)
         run: cargo clippy -p openwebide-backend --target wasm32-wasip2 -- -D warnings
@@ -58,7 +61,7 @@ jobs:
         run: cargo clippy -p openwebide-bridge --all-targets -- -D warnings
 
       - name: Tests (native)
-        run: cargo test -p openwebide-core -p openwebide-llm -p openwebide-storage -p openwebide-agent -p openwebide-auth -p openwebide-bridge -p openwebide-backend --features openwebide-core/editor-parser
+        run: cargo test -p openwebide-core -p openwebide-llm -p openwebide-storage -p openwebide-agent -p openwebide-auth -p openwebide-bridge -p openwebide-backend -p openwebide-plugin-sdk -p openwebide-plugin-runtime -p openwebide-plugin-build --features openwebide-core/editor-parser
 
       - name: Tests (editor storage workloads)
         run: cargo test -p openwebide-editor-bench --features candidates --release

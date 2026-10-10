@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Compile plugin source in normal Linux containers using an unprivileged compiler launcher with filesystem and syscall restrictions. Isolate dependency retrieval, retain macOS/native Linux build adapters, and package the pinned compiler and launcher. Offline executable defaults and first-party migrations remain in progress.
+
 - Authorize executable plugin callbacks with account/session/project grants pinned to the selected source and capabilities. Verify real compiled WASM record writes and reads on server and paired hosts; share plugin planning before model tool selection. Browser HTTP lifecycle verification and first-party migrations remain in progress.
 
 - Keep capability-expanding plugin updates pending for explicit review, including automatic compatible updates. Preserve the active version until the exact prepared update is approved.

@@ -34,18 +34,27 @@ RUN python3 tools/bundle_plugins.py
 #   backend  -> cargo build -p openwebide-backend --target wasm32-wasip2 --release
 #   frontend -> cd frontend && trunk build --release
 RUN spin build
-RUN cargo build -p openwebide-bridge --release --locked
+RUN cargo build -p openwebide-bridge -p openwebide-plugin-build --release --locked
 
 # --- runtime: Spin + prebuilt components ---
 FROM ghcr.io/spinframework/spin:v4.1.0
 
 # SSH client is included for Git and app-configured host administration.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends openssh-client && \
+    apt-get install -y --no-install-recommends openssh-client build-essential ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /src/target/release/openwebide-bridge /usr/local/bin/
+COPY --from=builder /src/target/release/openwebide-plugin-build /usr/local/bin/
+# The source compiler uses the pinned toolchain without relying on /root traversal
+# after dropping privileges. Package code cannot write this toolchain or the SDK.
+COPY --from=builder /root/.rustup /opt/openwebide-toolchain/rustup
+COPY --from=builder /root/.cargo/bin/rustup /opt/openwebide-toolchain/bin/rustup
+ENV RUSTUP_HOME=/opt/openwebide-toolchain/rustup
+ENV PATH="/opt/openwebide-toolchain/bin:${PATH}"
+RUN ln -s rustup /opt/openwebide-toolchain/bin/cargo && \
+    ln -s rustup /opt/openwebide-toolchain/bin/rustc
 COPY --chmod=755 docker/entrypoint.sh ./entrypoint.sh
 COPY --chmod=755 docker/ssh-init.sh /usr/local/bin/openwebide-ssh-init
 COPY --chmod=755 docker/git.sh /usr/local/bin/git
