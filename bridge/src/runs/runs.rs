@@ -567,6 +567,7 @@ async fn run_body<B: RunBackend + 'static, P: LlmProvider + 'static>(
                 environment: plan.environment.clone(),
                 plugin_skills: Arc::new(plan.plugin_skills.clone()),
                 plugin_executables: Arc::new(plan.plugin_executables.clone()),
+                plugin_grants: Arc::new(plan.plugin_grants.clone()),
                 plugin_transport: host.plugins.transport(run.owner),
                 primary: openwebide_core::ModelRuntime {
                     connection: plan.connection.clone(),
@@ -871,24 +872,20 @@ type BridgeBuiltinTaskExecutor<B> =
 type BridgeBaseTaskExecutor<B> = openwebide_agent::plugins::execution::PluginTools<
     BridgeBuiltinTaskExecutor<B>,
     crate::plugins::transport::NativePluginTransport,
-    BridgePluginServices<B>,
+    openwebide_agent::plugins::execution::GrantedServices<BridgePluginServices<B>>,
 >;
 struct BridgePluginServices<B> {
     backend: Arc<B>,
     user: i64,
     session: i64,
 }
-impl<B: RunBackend> openwebide_agent::plugins::execution::PluginServices
-    for BridgePluginServices<B>
-{
+impl<B: RunBackend> openwebide_agent::plugins::execution::GrantedHost for BridgePluginServices<B> {
     async fn request(
         &self,
-        plugin: &openwebide_core::plugins::PreparedPlugin,
-        capability: &str,
-        payload: &str,
+        request: &openwebide_core::plugins::execution::PluginHostRequest,
     ) -> Result<String, String> {
         self.backend
-            .plugin_request(self.user, self.session, plugin, capability, payload)
+            .plugin_request(self.user, self.session, request)
             .await
     }
 }
@@ -896,6 +893,7 @@ type BridgeTaskGate<B> = openwebide_agent::plugins::execution::PluginGate<
     openwebide_agent::policy::PolicyGate<BridgeGate, super::backend_client::ApprovalAdapter<B>>,
 >;
 struct BridgeTaskFactory<B> {
+    plugin_grants: Arc<std::collections::BTreeMap<String, String>>,
     plugin_executables: Arc<Vec<openwebide_core::plugins::PreparedPlugin>>,
     plugin_transport: crate::plugins::transport::NativePluginTransport,
     plugin_skills: Arc<Vec<openwebide_core::ProjectSkill>>,
@@ -911,6 +909,7 @@ impl<B> Clone for BridgeTaskFactory<B> {
     fn clone(&self) -> Self {
         Self {
             plugin_executables: self.plugin_executables.clone(),
+            plugin_grants: self.plugin_grants.clone(),
             plugin_transport: self.plugin_transport.clone(),
             plugin_skills: self.plugin_skills.clone(),
             run: self.run.clone(),
@@ -939,10 +938,13 @@ impl<B: RunBackend + 'static> BridgeTaskFactory<B> {
         openwebide_agent::plugins::execution::PluginTools {
             executor: self.builtin_executor(),
             transport: self.plugin_transport.clone(),
-            services: BridgePluginServices {
-                backend: self.backend.clone(),
-                user: self.run.owner,
-                session: self.run.session_id,
+            services: openwebide_agent::plugins::execution::GrantedServices {
+                grants: self.plugin_grants.clone(),
+                host: BridgePluginServices {
+                    backend: self.backend.clone(),
+                    user: self.run.owner,
+                    session: self.run.session_id,
+                },
             },
             plugins: self.plugin_executables.clone(),
         }

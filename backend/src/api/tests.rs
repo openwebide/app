@@ -2212,6 +2212,7 @@ async fn install_tool_group(
         .record_plugin(
             user,
             &openwebide_core::plugins::RecordPlugin {
+                approved_capabilities: Vec::new(),
                 prepared: package.prepared.clone(),
                 revision: None,
                 package: Some(Box::new(package)),
@@ -2237,6 +2238,7 @@ fn unavailable_bundle_host_preserves_account_access_existing_plugins_and_pending
             .record_plugin(
                 user.id,
                 &openwebide_core::plugins::RecordPlugin {
+                    approved_capabilities: Vec::new(),
                     prepared,
                     package: None,
                     revision: None,

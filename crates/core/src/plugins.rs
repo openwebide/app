@@ -275,6 +275,28 @@ pub struct PreparedPlugin {
     pub host_id: String,
 }
 impl PreparedPlugin {
+    /// Stable across versions, distinct across repositories claiming the same ID.
+    pub fn storage_namespace(&self) -> String {
+        let mut digest = Sha256::new();
+        for field in [
+            &self.source.repository,
+            &self.source.path,
+            &self.manifest.publisher,
+            &self.manifest.name,
+        ] {
+            digest.update(
+                u64::try_from(field.len())
+                    .expect("bounded field length")
+                    .to_be_bytes(),
+            );
+            digest.update(field.as_bytes());
+        }
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
     pub fn validate(&self) -> Result<(), PluginError> {
         self.source.validate()?;
         self.manifest.validate()?;
@@ -300,6 +322,9 @@ pub struct PluginInstallation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordPlugin {
+    /// Exact additions reviewed for this prepared version; never a blanket grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved_capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_policy: Option<PluginUpdatePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -599,6 +624,13 @@ pub fn record_installation(
                 "A pinned plugin version cannot change its contents.".into(),
             ));
         }
+        let added = added_capabilities(&existing.prepared, &request.prepared);
+        if !added.is_empty() && request.approved_capabilities != added {
+            return Err(PluginError::Conflict(format!(
+                "Review the plugin's new capabilities before updating: {}.",
+                added.join(", ")
+            )));
+        }
         if !same {
             existing.hosts.clear();
             existing.prepared = request.prepared.clone();
@@ -749,6 +781,20 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use testing::*;
+    #[test]
+    fn storage_namespace_survives_versions_but_separates_source_identity() {
+        let original = receipt();
+        let mut updated = original.clone();
+        updated.manifest.version = "0.2.0".into();
+        updated.digest = "c".repeat(64);
+        updated.source.commit = "c".repeat(40);
+        assert_eq!(original.storage_namespace(), updated.storage_namespace());
+        updated.source.repository = "https://example.com/another.git".into();
+        assert_ne!(original.storage_namespace(), updated.storage_namespace());
+        updated = original.clone();
+        updated.source.path = "another-plugin".into();
+        assert_ne!(original.storage_namespace(), updated.storage_namespace());
+    }
 
     struct Host {
         id: String,
@@ -943,6 +989,7 @@ mod tests {
     #[test]
     fn receipts_merge_hosts_without_enabling_and_updates_require_revision() {
         let request = RecordPlugin {
+            approved_capabilities: Vec::new(),
             update_policy: None,
             package: None,
             prepared: receipt(),
@@ -971,6 +1018,7 @@ mod tests {
     #[test]
     fn same_commit_cannot_change_its_validated_contents() {
         let request = RecordPlugin {
+            approved_capabilities: Vec::new(),
             update_policy: None,
             package: None,
             prepared: receipt(),
@@ -1121,6 +1169,26 @@ pub enum PluginUpdatePolicy {
     Automatic,
     Off,
 }
+
+/// Runtime authority additions are compared after preparing the actual source,
+/// regardless of catalog claims or SemVer compatibility.
+pub fn added_capabilities(previous: &PreparedPlugin, next: &PreparedPlugin) -> Vec<String> {
+    let previous: std::collections::BTreeSet<_> = previous
+        .manifest
+        .executable
+        .iter()
+        .flat_map(|rust| rust.capabilities.iter())
+        .collect();
+    next.manifest
+        .executable
+        .iter()
+        .flat_map(|rust| rust.capabilities.iter())
+        .filter(|capability| !previous.contains(capability))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
 #[derive(Clone, Debug)]
 pub struct PluginUpdate {
     pub installation: PluginInstallation,
@@ -1243,6 +1311,76 @@ mod update_tests {
     use super::*;
     use testing::{catalog, receipt};
     #[test]
+    fn capability_expansion_requires_exact_review_even_for_compatible_updates() {
+        let mut prepared = receipt();
+        prepared.manifest.compatibility.plugin_api = 3;
+        prepared.manifest.contributions.skills.clear();
+        prepared.manifest.contributions.tools = vec![PluginTool {
+            name: "community_lookup".into(),
+            description: "Look up records".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            requires_approval: false,
+        }];
+        prepared.manifest.executable = Some(RustPlugin {
+            manifest: "Cargo.toml".into(),
+            library: "lookup".into(),
+            sdk_version: "0.1.0".into(),
+            capabilities: vec!["records".into()],
+        });
+        let install = RecordPlugin {
+            approved_capabilities: Vec::new(),
+            update_policy: Some(PluginUpdatePolicy::Automatic),
+            package: None,
+            prepared: prepared.clone(),
+            revision: None,
+        };
+        let installed = record_installation(Vec::new(), &install, 1).unwrap();
+        let mut next = prepared.clone();
+        next.source.commit = "b".repeat(40);
+        next.digest = "b".repeat(64);
+        next.manifest.version = "0.1.1".into();
+        next.manifest.executable.as_mut().unwrap().capabilities =
+            vec!["http".into(), "records".into()];
+        assert_eq!(added_capabilities(&prepared, &next), vec!["http"]);
+        let mut update = RecordPlugin {
+            prepared: next.clone(),
+            revision: Some(installed[0].revision),
+            ..install.clone()
+        };
+        for approval in [
+            vec![],
+            vec!["records".into()],
+            vec!["http".into(), "jobs".into()],
+        ] {
+            update.approved_capabilities = approval;
+            assert!(matches!(
+                record_installation(installed.clone(), &update, 2),
+                Err(PluginError::Conflict(_))
+            ));
+        }
+        update.approved_capabilities = vec!["http".into()];
+        let installed = record_installation(installed, &update, 2).unwrap();
+        assert_eq!(installed[0].prepared, next);
+        assert_eq!(installed[0].update_policy, PluginUpdatePolicy::Automatic);
+        update.prepared.source.commit = "c".repeat(40);
+        update.prepared.digest = "c".repeat(64);
+        update.prepared.manifest.version = "0.1.2".into();
+        update
+            .prepared
+            .manifest
+            .executable
+            .as_mut()
+            .unwrap()
+            .capabilities = vec!["records".into()];
+        update.approved_capabilities.clear();
+        update.revision = Some(installed[0].revision);
+        assert!(added_capabilities(&next, &update.prepared).is_empty());
+        assert!(record_installation(installed.clone(), &update, 3).is_ok());
+        update.revision = Some(installed[0].revision - 1);
+        update.approved_capabilities = vec!["http".into()];
+        assert!(record_installation(installed, &update, 3).is_err());
+    }
+    #[test]
     fn notify_is_default_and_updates_use_semver_source_and_compatible_auto_policy() {
         let mut cache = catalog();
         for (version, path) in [
@@ -1265,6 +1403,7 @@ mod update_tests {
         let mut entries = record_installation(
             Vec::new(),
             &RecordPlugin {
+                approved_capabilities: Vec::new(),
                 prepared: receipt(),
                 revision: None,
                 package: None,
@@ -1300,6 +1439,7 @@ mod update_tests {
     #[test]
     fn preferences_are_revision_checked_and_verified_content_cannot_mismatch_receipts() {
         let request = RecordPlugin {
+            approved_capabilities: Vec::new(),
             prepared: receipt(),
             revision: None,
             package: None,

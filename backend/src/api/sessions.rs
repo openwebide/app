@@ -492,11 +492,11 @@ pub(super) async fn build_run_plan(
             context_limit: runtime.settings.context_limit,
         },
     );
-    let executables =
-        openwebide_agent::plugins::execution::configure_tools(&mut input.tools, &plugin_bindings)
-            .map_err(ApiError::bad_request)?;
-    let mut plan = openwebide_agent::session::plan(&runtime, input);
-    plan.plugin_executables = executables;
+    let mut plan = openwebide_agent::session::plan_with_plugins(&runtime, input, &plugin_bindings)
+        .map_err(ApiError::bad_request)?;
+    plan.plugin_grants =
+        super::plugins::execution_grants(state, user_id, session_id, &plan.plugin_executables)
+            .await?;
     plan.plugin_skills = openwebide_agent::skills::package_snapshot(&skills);
     if session.project_id.is_none()
         && state

@@ -1,0 +1,291 @@
+//! Durable authority snapshots for general host callbacks.
+use super::*;
+use openwebide_core::plugins::{
+    PreparedPlugin, default_bindings, execution::PluginHostRequest, records::RecordRequest,
+};
+
+impl<D: Db> Store<D> {
+    /// The API generates the opaque token. Only an enabled, installed receipt can
+    /// acquire authority; subsequent updates do not replace this run's snapshot.
+    pub async fn issue_plugin_grant(
+        &self,
+        user: UserId,
+        session: i64,
+        plugin: &PreparedPlugin,
+        token: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        plugin
+            .validate()
+            .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+        if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) || now < 0 {
+            return Err(StorageError::InvalidRequest(
+                "Invalid plugin execution grant".into(),
+            ));
+        }
+        self.db.transaction(|tx| async move {
+            let store = Store::new(tx);
+            let project = store.get_session(session, user).await?.project_id;
+            let bindings = match project {
+                Some(project) => store.project_plugins(user, project).await?,
+                None => default_bindings(&store.plugin_installations(user).await?),
+            };
+            if plugin.manifest.executable.is_none() || !bindings.iter().any(|binding| {
+                binding.enabled && binding.prepared.source == plugin.source
+                    && binding.prepared.manifest == plugin.manifest && binding.prepared.digest == plugin.digest
+            }) {
+                return Err(StorageError::Conflict("Plugin is no longer enabled at the selected version".into()));
+            }
+            let expires = now.checked_add(86_400).ok_or_else(|| StorageError::InvalidRequest("Invalid grant expiry".into()))?;
+            store.db.execute("DELETE FROM plugin_execution_grants WHERE expires_at<=?", &[DbValue::Int(now)]).await?;
+            store.db.execute("INSERT INTO plugin_execution_grants(token,user_id,session_id,project_scope,prepared,expires_at) VALUES(?,?,?,?,?,?)", &[
+                DbValue::Text(token.into()), DbValue::Int(user.get()), DbValue::Int(session), DbValue::Int(project.unwrap_or(0)),
+                DbValue::Text(serde_json::to_string(plugin).map_err(|error| StorageError::Db(error.to_string()))?), DbValue::Int(expires),
+            ]).await?;
+            Ok(())
+        }).await
+    }
+    /// Authority and storage mutations share a transaction, preventing a session
+    /// reassignment between checking its original project and writing records.
+    pub fn plugin_host_request<'a>(
+        &'a self,
+        user: UserId,
+        session: i64,
+        request: &'a PluginHostRequest,
+        now: i64,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<String, StorageError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.db.transaction(|tx| async move {
+            let store = Store::new(tx);
+            let current = store.get_session(session, user).await?;
+            let grant = store.db.execute("SELECT prepared,project_scope FROM plugin_execution_grants WHERE token=? AND user_id=? AND session_id=? AND expires_at>?", &[
+                DbValue::Text(request.grant.clone()), DbValue::Int(user.get()), DbValue::Int(session), DbValue::Int(now),
+            ]).await?;
+            let row = grant.rows.first().ok_or_else(|| StorageError::NotFound("Plugin execution grant".into()))?;
+            if row.get_int(1)? != current.project_id.unwrap_or(0) {
+                return Err(StorageError::Conflict("Plugin execution project changed".into()));
+            }
+            let plugin: PreparedPlugin = serde_json::from_str(row.get_text(0)?).map_err(|error| StorageError::Db(error.to_string()))?;
+            if !plugin.manifest.executable.as_ref().is_some_and(|rust| rust.capabilities.contains(&request.capability)) {
+                return Err(StorageError::InvalidRequest("Plugin capability is not granted".into()));
+            }
+            let namespace = plugin.storage_namespace();
+            match request.capability.as_str() {
+                "records" => {
+                    let command: RecordRequest = serde_json::from_str(&request.payload).map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                    let result = store.plugin_records_in_transaction(user, session, &namespace, &command, now).await?;
+                    serde_json::to_string(&result).map_err(|error| StorageError::Db(error.to_string()))
+                }
+                _ => Err(StorageError::InvalidRequest("Plugin host capability unavailable".into())),
+            }
+        }).await
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rusqlite_db::RusqliteDb;
+    use futures::executor::block_on;
+    use openwebide_core::plugins::{
+        PluginPackage, PluginTool, RecordPlugin, RemovePlugin, RustPlugin,
+    };
+    use serde_json::json;
+
+    fn receipt() -> PreparedPlugin {
+        let mut receipt = openwebide_core::plugins::testing::receipt();
+        receipt.manifest.publisher = "example".into();
+        receipt.manifest.name = "notes".into();
+        receipt.manifest.compatibility.plugin_api = 3;
+        receipt.manifest.contributions.skills.clear();
+        receipt.manifest.contributions.tools = vec![PluginTool {
+            name: "notes_add".into(),
+            description: "Add a note".into(),
+            parameters: json!({"type":"object"}),
+            requires_approval: true,
+        }];
+        receipt.manifest.executable = Some(RustPlugin {
+            manifest: "Cargo.toml".into(),
+            library: "notes".into(),
+            sdk_version: "0.1.0".into(),
+            capabilities: vec!["records".into()],
+        });
+        receipt
+    }
+    fn installation(prepared: &PreparedPlugin, revision: Option<i64>) -> RecordPlugin {
+        RecordPlugin {
+            approved_capabilities: Vec::new(),
+            prepared: prepared.clone(),
+            revision,
+            update_policy: None,
+            package: Some(Box::new(PluginPackage {
+                prepared: prepared.clone(),
+                skills: Vec::new(),
+            })),
+        }
+    }
+    fn request(grant: &str) -> PluginHostRequest {
+        PluginHostRequest {grant:grant.into(), capability:"records".into(), payload:json!({"collection":"notes","operation":{"action":"create","value":{"text":"owned"}}}).to_string()}
+    }
+    #[test]
+    fn execution_grants_pin_authority_through_updates_and_removal_in_both_modes() {
+        block_on(async {
+            for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+                let store = Store::new(RusqliteDb::open_in_memory().unwrap());
+                store.migrate().await.unwrap();
+                let owner = store
+                    .insert_user("owner", "hash", UserRole::Admin, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let other = store
+                    .insert_user("other", "hash", UserRole::User, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let project = store
+                    .create_project(
+                        &NewProject {
+                            name: "p".into(),
+                            mode,
+                            path: Some("p".into()),
+                        },
+                        owner,
+                        0,
+                    )
+                    .await
+                    .unwrap()
+                    .id;
+                let session = store
+                    .create_session("s", None, None, Some(project), owner, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let second = store
+                    .create_session("second", None, None, Some(project), owner, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let original = receipt();
+                let token = "a".repeat(32);
+                assert!(
+                    store
+                        .issue_plugin_grant(owner, session, &original, &token, 1)
+                        .await
+                        .is_err()
+                );
+                let installed = store
+                    .record_plugin(owner, &installation(&original, None), 1)
+                    .await
+                    .unwrap();
+                store
+                    .issue_plugin_grant(owner, session, &original, &token, 2)
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .issue_plugin_grant(other, session, &original, &"d".repeat(32), 2)
+                        .await
+                        .is_err()
+                );
+                let call = request(&token);
+                assert!(
+                    store
+                        .plugin_host_request(other, session, &call, 3)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .plugin_host_request(owner, second, &call, 3)
+                        .await
+                        .is_err()
+                );
+                let first: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(owner, session, &call, 3)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(first["records"][0]["value"]["text"], "owned");
+                let mut updated = original.clone();
+                updated.source.commit = "c".repeat(40);
+                updated.digest = "c".repeat(64);
+                updated.manifest.version = "0.2.0".into();
+                updated.manifest.executable.as_mut().unwrap().capabilities = vec!["http".into()];
+                let mut update = installation(&updated, Some(installed[0].revision));
+                update.approved_capabilities = vec!["http".into()];
+                let installed = store.record_plugin(owner, &update, 4).await.unwrap();
+                let next_token = "b".repeat(32);
+                store
+                    .issue_plugin_grant(owner, session, &updated, &next_token, 5)
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .issue_plugin_grant(owner, session, &original, &"e".repeat(32), 5)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .plugin_host_request(owner, session, &request(&next_token), 6)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .plugin_host_request(owner, session, &call, 6)
+                        .await
+                        .is_ok()
+                );
+                store
+                    .remove_plugin(
+                        owner,
+                        &RemovePlugin {
+                            source: updated.source,
+                            revision: installed[0].revision,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .plugin_host_request(owner, session, &call, 8)
+                        .await
+                        .is_ok()
+                );
+                assert!(
+                    store
+                        .plugin_host_request(owner, session, &call, 86_402)
+                        .await
+                        .is_err()
+                );
+                store
+                    .db
+                    .execute(
+                        "UPDATE sessions SET project_id=NULL WHERE id=?",
+                        &[DbValue::Int(session)],
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .plugin_host_request(owner, session, &call, 9)
+                        .await
+                        .is_err()
+                );
+                let rows = store
+                    .db
+                    .execute("SELECT COUNT(*) FROM plugin_records", &[])
+                    .await
+                    .unwrap();
+                assert_eq!(rows.rows[0].get_int(0).unwrap(), 3);
+            }
+        });
+    }
+}

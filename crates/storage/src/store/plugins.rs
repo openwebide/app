@@ -165,6 +165,7 @@ impl<D: Db> Store<D> {
                         .record_plugin_in_transaction(
                             user,
                             &RecordPlugin {
+                                approved_capabilities: Vec::new(),
                                 prepared: package.prepared.clone(),
                                 package: Some(Box::new(package.clone())),
                                 revision: None,
@@ -199,6 +200,7 @@ mod tests {
                 .await
                 .unwrap();
             let request = RecordPlugin {
+                approved_capabilities: Vec::new(),
                 update_policy: None,
                 package: None,
                 prepared: receipt(),
@@ -621,6 +623,7 @@ mod lifecycle_tests {
                     .record_plugin(
                         user,
                         &RecordPlugin {
+                            approved_capabilities: Vec::new(),
                             update_policy: None,
                             package: None,
                             prepared: package.prepared.clone(),
@@ -722,6 +725,7 @@ mod lifecycle_tests {
                     .record_plugin(
                         user,
                         &RecordPlugin {
+                            approved_capabilities: Vec::new(),
                             update_policy: None,
                             package: None,
                             prepared: updated.prepared.clone(),
@@ -763,6 +767,7 @@ mod lifecycle_tests {
                     .record_plugin(
                         user,
                         &RecordPlugin {
+                            approved_capabilities: Vec::new(),
                             update_policy: None,
                             package: None,
                             prepared: package.prepared.clone(),
@@ -921,6 +926,7 @@ mod lifecycle_tests {
                 .record_plugin(
                     user,
                     &RecordPlugin {
+                        approved_capabilities: Vec::new(),
                         update_policy: None,
                         package: None,
                         prepared: package.prepared.clone(),
@@ -1097,6 +1103,7 @@ mod default_tests {
                     .record_plugin(
                         user,
                         &RecordPlugin {
+                            approved_capabilities: Vec::new(),
                             update_policy: None,
                             prepared: package.prepared.clone(),
                             revision: None,
@@ -1149,6 +1156,7 @@ mod default_tests {
                     .record_plugin(
                         user,
                         &RecordPlugin {
+                            approved_capabilities: Vec::new(),
                             update_policy: None,
                             prepared: updated.prepared.clone(),
                             revision: Some(entries[0].revision),
@@ -1294,6 +1302,7 @@ mod default_conflict_tests {
                     .record_plugin(
                         user,
                         &RecordPlugin {
+                            approved_capabilities: Vec::new(),
                             prepared: package.prepared.clone(),
                             revision: None,
                             package: Some(Box::new(package)),
@@ -1524,6 +1533,7 @@ mod bundled_tests {
                     .record_plugin(
                         other,
                         &RecordPlugin {
+                            approved_capabilities: Vec::new(),
                             prepared: newer.prepared.clone(),
                             package: Some(Box::new(newer)),
                             revision: None,

@@ -2837,6 +2837,7 @@ dependencies = [
  "openwebide-core",
  "openwebide-llm",
  "openwebide-plugin-runtime",
+ "openwebide-storage",
  "portable-pty",
  "rand 0.10.3",
  "serde",

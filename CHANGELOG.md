@@ -9,7 +9,11 @@ for what's still ahead.
 
 ## [Unreleased]
 
-- Add transactional plugin-owned record storage with account/project/plugin namespaces, revision checks, bounded pages and quotas, plus an isolated Rust source authoring checker. Runtime persistence authorization and first-party migrations remain in progress.
+- Authorize executable plugin callbacks with account/session/project grants pinned to the selected source and capabilities. Verify real compiled WASM record writes and reads on server and paired hosts; share plugin planning before model tool selection. Browser HTTP lifecycle verification and first-party migrations remain in progress.
+
+- Keep capability-expanding plugin updates pending for explicit review, including automatic compatible updates. Preserve the active version until the exact prepared update is approved.
+
+- Add transactional plugin-owned record storage with account/project/plugin namespaces, revision checks, bounded pages and quotas, plus an isolated Rust source authoring checker. Shared collection adapters and first-party migrations remain in progress.
 
 - Add Rust plugin SDK and isolated source-to-WASM preparation foundations, with a shared executable-tool workflow for server and paired hosts. General persistence/job capabilities, first-party behavior migration and offline executable defaults remain unfinished.
 

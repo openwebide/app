@@ -49,6 +49,7 @@ enum Operation {
     Refresh,
     Catalogs,
     UpdateAll,
+    ApproveUpdate(PluginSource),
     Policy(Box<PluginInstallation>, PluginUpdatePolicy),
     Sources(Vec<MarketplaceSource>),
     Install(Option<CatalogSelection>),
@@ -61,6 +62,8 @@ pub struct ProjectPluginActions {
     pub refresh: Callback<()>,
     pub refresh_catalogs: Callback<()>,
     pub update_all: Callback<()>,
+    pub approve_update: Callback<PluginSource>,
+    pub dismiss_update: Callback<PluginSource>,
     pub set_update_policy: Callback<(PluginInstallation, PluginUpdatePolicy)>,
     pub save_sources: Callback<Vec<MarketplaceSource>>,
     pub install: Callback<()>,
@@ -102,12 +105,28 @@ impl ProjectPluginActions {
             )
         };
         let perform = Callback::new(move |operation: Operation| {
+            // Check synchronously as well as in the invalidation effect: a
+            // pending review cannot cross a scope change before effects run.
+            if state
+                .review_current
+                .get_untracked()
+                .is_some_and(|check| !check())
+            {
+                state.pending_updates.set(Vec::new());
+                state.review_current.set(None);
+            }
             if state.busy.get_untracked() {
                 return;
             }
             generation.update(|g| *g += 1);
             let ticket = generation.get_untracked();
             let identity = scope();
+            if state.pending_updates.with_untracked(Vec::is_empty) {
+                let review_identity = identity.clone();
+                state.review_current.set(Some(std::sync::Arc::new(move || {
+                    scope() == review_identity
+                })));
+            }
             let current = move || {
                 generation.try_get_untracked() == Some(ticket)
                     && auth.generation.try_get_untracked().is_some()
@@ -121,6 +140,7 @@ impl ProjectPluginActions {
                     operation,
                     Operation::Install(_)
                         | Operation::UpdateAll
+                        | Operation::ApproveUpdate(_)
                         | Operation::Catalogs
                         | Operation::Refresh
                         | Operation::Enable(_)
@@ -150,6 +170,8 @@ impl ProjectPluginActions {
             projects.local_handles.track();
             generation.update(|g| *g += 1);
             state.installations.set(Vec::new());
+            state.pending_updates.set(Vec::new());
+            state.review_current.set(None);
             state.project_plugins.set(Vec::new());
             state.marketplaces.set(MarketplaceSettings::default());
             state.failures.set(Vec::new());
@@ -197,6 +219,14 @@ impl ProjectPluginActions {
             refresh,
             refresh_catalogs: Callback::new(move |()| perform.run(Operation::Catalogs)),
             update_all: Callback::new(move |()| perform.run(Operation::UpdateAll)),
+            approve_update: Callback::new(move |source| {
+                perform.run(Operation::ApproveUpdate(source));
+            }),
+            dismiss_update: Callback::new(move |source| {
+                state
+                    .pending_updates
+                    .update(|updates| updates.retain(|update| update.prepared.source != source));
+            }),
             set_update_policy: Callback::new(move |(entry, policy)| {
                 perform.run(Operation::Policy(Box::new(entry), policy));
             }),
@@ -223,6 +253,31 @@ async fn run_operation(
     let backend = api.with_value(Clone::clone);
 
     match operation {
+        Operation::ApproveUpdate(source) => {
+            let request = state
+                .pending_updates
+                .with_untracked(|updates| {
+                    updates
+                        .iter()
+                        .find(|update| update.prepared.source == source)
+                        .cloned()
+                })
+                .ok_or("This plugin update is no longer pending.")?;
+            let entries = backend.record_plugin(&request).await?;
+            if !current() {
+                return Ok(());
+            }
+            state.installations.set(entries);
+            state
+                .pending_updates
+                .update(|updates| updates.retain(|update| update.prepared.source != source));
+            if let Some(id) = project {
+                let bindings = backend.project_plugins(id).await?;
+                if current() {
+                    state.project_plugins.set(bindings);
+                }
+            }
+        }
         Operation::Refresh => {
             let entries = backend.plugin_installations().await?;
             if !current() {
@@ -263,6 +318,7 @@ async fn run_operation(
                 }
                 entries = backend
                     .record_plugin(&RecordPlugin {
+                        approved_capabilities: Vec::new(),
                         update_policy: None,
                         prepared: package.prepared.clone(),
                         revision: Some(entry.revision),
@@ -348,6 +404,7 @@ async fn run_operation(
         Operation::Policy(entry, policy) => {
             let entries = backend
                 .record_plugin(&RecordPlugin {
+                    approved_capabilities: Vec::new(),
                     prepared: entry.prepared.clone(),
                     revision: Some(entry.revision),
                     package: None,
@@ -392,6 +449,7 @@ async fn run_operation(
             }
             let entries = backend
                 .record_plugin(&RecordPlugin {
+                    approved_capabilities: Vec::new(),
                     update_policy: None,
                     package: None,
                     prepared: package.prepared.clone(),
@@ -472,15 +530,16 @@ async fn install_plugin(
         )
     };
     source.validate().map_err(|e| e.to_string())?;
-    let revision = state.installations.with_untracked(|entries| {
+    let previous = state.installations.with_untracked(|entries| {
         entries
             .iter()
             .find(|e| {
                 e.prepared.source.repository == source.repository
                     && e.prepared.source.path == source.path
             })
-            .map(|e| e.revision)
+            .cloned()
     });
+    let revision = previous.as_ref().map(|entry| entry.revision);
     let transport = match host.resolve_guarded(project, true, current.clone()).await? {
         ProjectExecution::Remote { api, .. } => PluginTransport::Remote(api, project),
         ProjectExecution::Local(client) => PluginTransport::Local(client),
@@ -508,14 +567,27 @@ async fn install_plugin(
     if !current() {
         return Ok(());
     }
-    let entries = backend
-        .record_plugin(&RecordPlugin {
-            update_policy: None,
-            prepared: package.prepared.clone(),
-            revision,
-            package: Some(Box::new(package)),
-        })
-        .await?;
+    let capabilities = previous.as_ref().map_or_else(Vec::new, |entry| {
+        added_capabilities(&entry.prepared, &prepared)
+    });
+    let request = RecordPlugin {
+        approved_capabilities: capabilities.clone(),
+        update_policy: None,
+        prepared: package.prepared.clone(),
+        revision,
+        package: Some(Box::new(package)),
+    };
+    if !capabilities.is_empty() {
+        state.pending_updates.update(|updates| {
+            updates.retain(|update| {
+                update.prepared.source.repository != source.repository
+                    || update.prepared.source.path != source.path
+            });
+            updates.push(request);
+        });
+        return Ok(());
+    }
+    let entries = backend.record_plugin(&request).await?;
     if !current() {
         return Ok(());
     }

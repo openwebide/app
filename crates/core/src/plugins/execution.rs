@@ -16,6 +16,14 @@ pub struct ContinuePlugin {
     pub sequence: u32,
     pub response: Result<String, String>,
 }
+/// The authenticated caller supplies the opaque run grant, never the plugin.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginHostRequest {
+    pub grant: String,
+    pub capability: String,
+    pub payload: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginInvocation {

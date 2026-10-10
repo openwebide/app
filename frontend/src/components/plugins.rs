@@ -59,6 +59,17 @@ pub fn Plugins() -> impl IntoView {
             </PanelSearchRow>
             <Show when=move ||state.busy.get()><p class="form-hint" role="status">"Working…"</p></Show>
             <Show when=move ||state.error.get().is_some()><p class="error" role="alert">{move ||state.error.get().unwrap_or_default()}</p></Show>
+            <For each=move ||state.pending_updates.get() key=|update|(update.prepared.source.repository.clone(), update.prepared.source.path.clone(), update.prepared.source.commit.clone()) children=move |update| {
+                let source = StoredValue::new(update.prepared.source.clone());
+                view! { <FormSection title="Review plugin update"><div class="ui-section-content">
+                    <p>{format!("{} {} requests additional access: {}.", update.prepared.manifest.display_name, update.prepared.manifest.version, update.approved_capabilities.join(", "))}</p>
+                    <p class="form-hint">"Your installed version stays active until you approve this update."</p>
+                    <InlineActions>
+                        <Button disabled=state.busy.read_only() on_click=Callback::new(move |_|actions.approve_update.run(source.get_value()))>"Approve and update"</Button>
+                        <Button variant=ButtonVariant::Ghost disabled=state.busy.read_only() on_click=Callback::new(move |_|actions.dismiss_update.run(source.get_value()))>"Keep current version"</Button>
+                    </InlineActions>
+                </div></FormSection> }
+            }/>
             <For each=move ||state.failures.get() key=|f|(f.source.repository.clone(),f.source.reference.clone(),f.source.path.clone()) children=move |failure|view!{<p class="error" role="alert">{format!("{}: {} Previously cached releases remain available.",failure.source.repository,failure.message)}</p>}/>
             <Show when=move ||projects.active_project.get().is_none()><p class="form-hint">"Install plugins on the server host. They are enabled by default in your projects."</p></Show>
             <PluginSection title="Installed" count=Signal::derive(move ||filtered_installations(state).len()) header_actions=move || view! {

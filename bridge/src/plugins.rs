@@ -1030,6 +1030,132 @@ mod bundled_tests {
 mod rust_plugin_tests {
     use super::*;
     use openwebide_core::plugins::execution;
+    struct DatabaseHost {
+        store: openwebide_storage::Store<openwebide_storage::rusqlite_db::RusqliteDb>,
+        user: openwebide_core::UserId,
+        session: i64,
+    }
+    impl openwebide_agent::plugins::execution::GrantedHost for DatabaseHost {
+        async fn request(&self, request: &execution::PluginHostRequest) -> Result<String, String> {
+            self.store
+                .plugin_host_request(self.user, self.session, request, 10)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
+    struct NoBuiltin;
+    impl openwebide_agent::ToolExecutor for NoBuiltin {
+        fn describe(&self, call: &openwebide_core::ToolCall) -> String {
+            call.name.clone()
+        }
+        async fn execute(&self, _: &openwebide_core::ToolCall) -> openwebide_agent::ToolOutcome {
+            panic!("Plugin tool must not fall through to a built-in executor")
+        }
+    }
+    async fn exercise_records(
+        installer: &NativePluginInstaller,
+        owner: &str,
+        prepared: &PreparedPlugin,
+    ) {
+        use openwebide_agent::{
+            ToolExecutor,
+            plugins::execution::{GrantedServices, PluginTools},
+        };
+        use openwebide_core::{
+            NewProject, UserRole, WorkspaceMode,
+            plugins::{PluginPackage, RecordPlugin},
+        };
+        let store = openwebide_storage::Store::new(
+            openwebide_storage::rusqlite_db::RusqliteDb::open_in_memory().unwrap(),
+        );
+        store.migrate().await.unwrap();
+        let user = store
+            .insert_user("owner", "hash", UserRole::Admin, 0)
+            .await
+            .unwrap()
+            .id;
+        let mode = if owner == "paired" {
+            WorkspaceMode::Local
+        } else {
+            WorkspaceMode::Remote
+        };
+        let project = store
+            .create_project(
+                &NewProject {
+                    name: "project".into(),
+                    mode,
+                    path: Some("p".into()),
+                },
+                user,
+                0,
+            )
+            .await
+            .unwrap()
+            .id;
+        let session = store
+            .create_session("session", None, None, Some(project), user, 0)
+            .await
+            .unwrap()
+            .id;
+        store
+            .record_plugin(
+                user,
+                &RecordPlugin {
+                    approved_capabilities: Vec::new(),
+                    prepared: prepared.clone(),
+                    revision: None,
+                    update_policy: None,
+                    package: Some(Box::new(PluginPackage {
+                        prepared: prepared.clone(),
+                        skills: Vec::new(),
+                    })),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let token = "d".repeat(32);
+        store
+            .issue_plugin_grant(user, session, prepared, &token, 2)
+            .await
+            .unwrap();
+        let executor = PluginTools {
+            executor: NoBuiltin,
+            transport: transport::NativePluginTransport {
+                installer: installer.clone(),
+                invocations: invocations::Invocations::default(),
+                owner: owner.into(),
+            },
+            services: GrantedServices {
+                host: DatabaseHost {
+                    store,
+                    user,
+                    session,
+                },
+                grants: Arc::new([(prepared.digest.clone(), token)].into_iter().collect()),
+            },
+            plugins: Arc::new(vec![prepared.clone()]),
+        };
+        let call = openwebide_core::ToolCall {id:"fixture".into(), name:"fixture_echo".into(),
+            arguments:serde_json::json!({"collection":"notes","operation":{"action":"create","value":{"text":"plugin-owned state"}}}).to_string()};
+        let outcome = executor.execute(&call).await;
+        assert!(outcome.ok, "{}", outcome.content);
+        let result: serde_json::Value = serde_json::from_str(&outcome.content).unwrap();
+        assert_eq!(result["records"][0]["value"]["text"], "plugin-owned state");
+        let id = result["records"][0]["id"].as_i64().unwrap();
+        let read = openwebide_core::ToolCall {
+            arguments:
+                serde_json::json!({"collection":"notes","operation":{"action":"read","id":id}})
+                    .to_string(),
+            ..call
+        };
+        let outcome = executor.execute(&read).await;
+        assert!(outcome.ok);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&outcome.content).unwrap(),
+            result
+        );
+    }
     #[tokio::test]
     async fn source_compilation_validates_tools_caches_offline_and_rejects_artifact_corruption() {
         let root = tempfile::tempdir().unwrap();
@@ -1085,6 +1211,7 @@ mod rust_plugin_tests {
                 digest: digest.clone(),
                 host_id: host_id.into(),
             };
+            exercise_records(&installer, owner, &prepared).await;
             let invocations = invocations::Invocations::default();
             let ready = invocations
                 .start(

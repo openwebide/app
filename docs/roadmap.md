@@ -397,8 +397,8 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
-- Complete the Rust SDK execution foundations with authenticated general
-  persistence, job and workspace primitives, capability-change approval,
+- Extend authenticated, run-pinned private record callbacks with shared collection
+  adapters, job and workspace primitives,
   installation progress and cancellation, Linux container build isolation, and
   offline compiled defaults. Marketplaces ship pinned Rust source and Cargo.lock;
   hosts compile against the declared SDK version and validate the WASM component

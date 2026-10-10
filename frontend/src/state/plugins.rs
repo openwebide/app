@@ -1,11 +1,15 @@
 use leptos::prelude::*;
 use openwebide_core::plugins::{
-    PluginInstallation, ProjectPlugin,
+    PluginInstallation, ProjectPlugin, RecordPlugin,
     marketplace::{MarketplaceFailure, MarketplaceSettings},
 };
 
+type ReviewScope = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 #[derive(Clone, Copy)]
 pub struct PluginsState {
+    pub review_current: RwSignal<Option<ReviewScope>>,
+    pub pending_updates: RwSignal<Vec<RecordPlugin>>,
     pub installations: RwSignal<Vec<PluginInstallation>>,
     pub project_plugins: RwSignal<Vec<ProjectPlugin>>,
     pub marketplaces: RwSignal<MarketplaceSettings>,
@@ -32,6 +36,8 @@ impl PluginsState {
 impl Default for PluginsState {
     fn default() -> Self {
         Self {
+            review_current: RwSignal::new(None),
+            pending_updates: RwSignal::new(Vec::new()),
             installations: RwSignal::new(Vec::new()),
             project_plugins: RwSignal::new(Vec::new()),
             marketplaces: RwSignal::new(MarketplaceSettings::default()),

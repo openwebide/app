@@ -965,12 +965,14 @@ pub async fn run_local_agent(
             context_limit: runtime.settings.context_limit,
         },
     );
-    let mut plan = openwebide_agent::session::plan(&runtime, input);
-    plan.plugin_executables = openwebide_agent::plugins::execution::configure_tools(
-        &mut plan.request.tools,
-        &plugin_bindings,
-    )?;
+    let mut plan = openwebide_agent::session::plan_with_plugins(&runtime, input, &plugin_bindings)?;
     plan.plugin_skills = openwebide_agent::skills::package_snapshot(&skills);
+    if !plan.plugin_executables.is_empty() {
+        plan.plugin_grants = api
+            .with_value(Clone::clone)
+            .plugin_execution_grants(session_id, &plan.plugin_executables)
+            .await?;
+    }
     if !current() {
         return Err("Project access changed".into());
     }
@@ -1089,6 +1091,7 @@ pub async fn run_local_agent(
         let factory = BrowserTaskFactory {
             plugin_skills: Arc::new(plan.plugin_skills),
             plugin_executables: Arc::new(plan.plugin_executables),
+            plugin_grants: Arc::new(plan.plugin_grants),
             api: SendWrapper::new(api),
             vfs,
             bridge,
@@ -1355,7 +1358,7 @@ type BrowserBuiltinTaskExecutor =
 type BrowserBaseTaskExecutor = openwebide_agent::plugins::execution::PluginTools<
     BrowserBuiltinTaskExecutor,
     BrowserPluginTransport,
-    BrowserPluginServices,
+    openwebide_agent::plugins::execution::GrantedServices<BrowserPluginServices>,
 >;
 #[derive(Clone)]
 struct BrowserPluginTransport(Option<BrowserBridgeClient>);
@@ -1400,17 +1403,15 @@ struct BrowserPluginServices {
     api: SendWrapper<Api>,
     session: i64,
 }
-impl openwebide_agent::plugins::execution::PluginServices for BrowserPluginServices {
+impl openwebide_agent::plugins::execution::GrantedHost for BrowserPluginServices {
     async fn request(
         &self,
-        plugin: &openwebide_core::plugins::PreparedPlugin,
-        capability: &str,
-        payload: &str,
+        request: &openwebide_core::plugins::execution::PluginHostRequest,
     ) -> Result<String, String> {
         SendWrapper::new(async move {
             self.api
                 .with_value(Clone::clone)
-                .plugin_host_request(self.session, plugin, capability, payload)
+                .plugin_host_request(self.session, request)
                 .await
         })
         .await
@@ -1421,6 +1422,7 @@ type BrowserTaskGate = openwebide_agent::plugins::execution::PluginGate<
 >;
 #[derive(Clone)]
 struct BrowserTaskFactory {
+    plugin_grants: Arc<std::collections::BTreeMap<String, String>>,
     plugin_executables: Arc<Vec<openwebide_core::plugins::PreparedPlugin>>,
     plugin_skills: Arc<Vec<openwebide_core::ProjectSkill>>,
     api: SendWrapper<Api>,
@@ -1447,9 +1449,12 @@ impl BrowserTaskFactory {
         openwebide_agent::plugins::execution::PluginTools {
             executor: self.builtin_executor(),
             transport: BrowserPluginTransport(self.bridge.clone()),
-            services: BrowserPluginServices {
-                api: self.api.clone(),
-                session: self.session,
+            services: openwebide_agent::plugins::execution::GrantedServices {
+                grants: self.plugin_grants.clone(),
+                host: BrowserPluginServices {
+                    api: self.api.clone(),
+                    session: self.session,
+                },
             },
             plugins: self.plugin_executables.clone(),
         }

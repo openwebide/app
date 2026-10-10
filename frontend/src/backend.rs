@@ -583,11 +583,16 @@ pub trait Backend {
     fn plugin_host_request<'a>(
         &'a self,
         _session: i64,
-        _plugin: &'a openwebide_core::plugins::PreparedPlugin,
-        _capability: &'a str,
-        _payload: &'a str,
+        _request: &'a openwebide_core::plugins::execution::PluginHostRequest,
     ) -> LocalBoxFuture<'a, Result<String, String>> {
         Box::pin(async { Err("Plugin host capability unavailable".into()) })
+    }
+    fn plugin_execution_grants<'a>(
+        &'a self,
+        _session: i64,
+        _plugins: &'a [openwebide_core::plugins::PreparedPlugin],
+    ) -> LocalBoxFuture<'a, Result<std::collections::BTreeMap<String, String>, String>> {
+        Box::pin(async { Err("Plugin execution grants unavailable".into()) })
     }
     fn plugin_installations(
         &self,
@@ -1520,6 +1525,20 @@ impl Backend for BackendApi {
         expected: &'a openwebide_core::plugins::PreparedPlugin,
     ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::PluginPackage, String>> {
         Box::pin(BackendApi::plugin_package(self, project, expected))
+    }
+    fn plugin_host_request<'a>(
+        &'a self,
+        session: i64,
+        request: &'a openwebide_core::plugins::execution::PluginHostRequest,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
+        Box::pin(BackendApi::plugin_host_request(self, session, request))
+    }
+    fn plugin_execution_grants<'a>(
+        &'a self,
+        session: i64,
+        plugins: &'a [openwebide_core::plugins::PreparedPlugin],
+    ) -> LocalBoxFuture<'a, Result<std::collections::BTreeMap<String, String>, String>> {
+        Box::pin(BackendApi::plugin_execution_grants(self, session, plugins))
     }
     fn plugin_installations(
         &self,

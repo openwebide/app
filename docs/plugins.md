@@ -149,9 +149,21 @@ require a publisher-hosted WASM artifact. Bundled plugins receive the same
 interfaces and privileges.
 
 The SDK, source preparation and shared execution workflow are foundations in
-progress. HTTP and clock primitives run on the bridge; authenticated persistence,
-job and workspace callbacks, Linux installation verification and compiled offline
-defaults still need implementation. API 2 first-party plugins remain transitional.
+progress. HTTP and clock primitives run on the bridge. Private record callbacks
+use opaque run grants checked against the authenticated account, session, original
+project and pinned plugin source/capabilities. Record collections persist across
+plugin updates and reinstalls, with revision checks, bounded pages and quotas.
+Grant tokens stay in host orchestration and are never passed to plugin code.
+Shared collection adapters, job and workspace callbacks, Linux installation
+verification and compiled offline defaults still need implementation. API 2
+first-party plugins remain transitional.
+
+Both host adapters prepare plugin tools through the shared run planner before
+applying connection tool selection and model tool settings. A plugin without an
+advertised tool receives no execution grant. The installed version remains active
+when a prepared update requests additional capabilities, including compatible
+automatic updates. The Plugins interface shows the additions for explicit review;
+approval applies only to that prepared version and installation revision.
 
 Web's source reference implementation now lives in the plugins repository and
 uses only the public SDK HTTP primitive. Its API 3 release remains unlisted while

@@ -239,6 +239,7 @@ fn plan(kind: RunKind, content: &str) -> RunPlan {
     }
     RunPlan {
         plugin_executables: Vec::new(),
+        plugin_grants: Default::default(),
         plugin_skills: Vec::new(),
         transport: Default::default(),
         environment: openwebide_core::RunEnvironment::default(),

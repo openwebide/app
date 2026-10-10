@@ -1180,6 +1180,22 @@ impl BackendApi {
         );
         self.post(&path, expected).await
     }
+    pub async fn plugin_execution_grants(
+        &self,
+        session: i64,
+        plugins: &[openwebide_core::plugins::PreparedPlugin],
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        self.post(&format!("/sessions/{session}/plugin-grants"), &plugins)
+            .await
+    }
+    pub async fn plugin_host_request(
+        &self,
+        session: i64,
+        request: &openwebide_core::plugins::execution::PluginHostRequest,
+    ) -> Result<String, String> {
+        self.post(&format!("/sessions/{session}/plugin-host"), request)
+            .await
+    }
     pub async fn plugin_installations(
         &self,
     ) -> Result<Vec<openwebide_core::plugins::PluginInstallation>, String> {

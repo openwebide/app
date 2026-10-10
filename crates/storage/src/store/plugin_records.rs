@@ -5,86 +5,138 @@ use openwebide_core::plugins::records::{
 };
 
 impl<D: Db> Store<D> {
-    /// `plugin` is the verified publisher/name, supplied by the invocation host.
+    /// `plugin` is a verified namespace supplied by the invocation host.
     /// A session cannot select another project's records, and records outlive
     /// plugin version changes or removal so reinstalling can recover its state.
-    pub fn plugin_records<'a>(
-        &'a self,
+    pub async fn plugin_records(
+        &self,
         user: UserId,
         session: i64,
-        plugin: &'a str,
-        request: &'a RecordRequest,
+        plugin: &str,
+        request: &RecordRequest,
         now: i64,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<RecordResult, StorageError>> + Send + 'a>,
-    > {
-        Box::pin(async move {
-            request.validate().map_err(StorageError::InvalidRequest)?;
-            let (publisher, name) = plugin
-                .split_once('/')
-                .ok_or_else(|| StorageError::InvalidRequest("Invalid plugin namespace".into()))?;
-            if [publisher, name].iter().any(|part| {
-                part.is_empty()
-                    || part.len() > 64
-                    || !part.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-                    })
-            }) {
-                return Err(StorageError::InvalidRequest(
-                    "Invalid plugin namespace".into(),
-                ));
-            }
-            self.db.transaction(|tx| async move {
-                let store = Store::new(tx);
-                let project = store.get_session(session, user).await?.project_id.unwrap_or(0);
-                if project != 0 { store.get_project(project, user).await?; }
-                let mut scope = vec![DbValue::Int(user.get()), DbValue::Int(project), DbValue::Text(plugin.into()), DbValue::Text(request.collection.clone())];
-                let mut read_id = None;
-                match &request.operation {
-                    RecordOperation::Create {value} => {
-                        let count = store.db.execute("SELECT COUNT(*) FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=?", &scope[..3]).await?;
-                        if count.rows[0].get_int(0)? >= i64::try_from(MAX_RECORDS).unwrap_or(i64::MAX) {
-                            return Err(StorageError::InvalidRequest("Plugin record collection is full".into()));
-                        }
-                        let mut values = scope.clone();
-                        values.extend([DbValue::Text(value.to_string()), DbValue::Int(now)]);
-                        read_id = Some(store.db.execute("INSERT INTO plugin_records(user_id,project_scope,plugin,collection,value,updated_at) VALUES(?,?,?,?,?,?)", &values).await?.last_insert_rowid);
-                    }
-                    RecordOperation::Update {id, revision, value} => {
-                        let mut values = vec![DbValue::Text(value.to_string()), DbValue::Int(now)];
-                        values.extend(scope.clone());
-                        values.extend([DbValue::Int(*id), DbValue::Int(*revision)]);
-                        let changed = store.db.execute("UPDATE plugin_records SET value=?,updated_at=?,revision=revision+1 WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id=? AND revision=?", &values).await?;
-                        if changed.changes != 1 { return Err(StorageError::Conflict("Record changed or is unavailable".into())); }
-                        read_id = Some(*id);
-                    }
-                    RecordOperation::Delete {id, revision} => {
-                        scope.extend([DbValue::Int(*id), DbValue::Int(*revision)]);
-                        let changed = store.db.execute("DELETE FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id=? AND revision=?", &scope).await?;
-                        if changed.changes != 1 { return Err(StorageError::Conflict("Record changed or is unavailable".into())); }
-                        return Ok(RecordResult {records: Vec::new(), next: None});
-                    }
-                    RecordOperation::Read {id} => read_id = Some(*id),
-                    RecordOperation::List {..} => (),
+    ) -> Result<RecordResult, StorageError> {
+        self.db
+            .transaction(|tx| async move {
+                Store::new(tx)
+                    .plugin_records_in_transaction(user, session, plugin, request, now)
+                    .await
+            })
+            .await
+    }
+    pub(super) async fn plugin_records_in_transaction(
+        &self,
+        user: UserId,
+        session: i64,
+        plugin: &str,
+        request: &RecordRequest,
+        now: i64,
+    ) -> Result<RecordResult, StorageError> {
+        request.validate().map_err(StorageError::InvalidRequest)?;
+        if plugin.is_empty()
+            || plugin.len() > 128
+            || !plugin.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'/')
+            })
+        {
+            return Err(StorageError::InvalidRequest(
+                "Invalid plugin namespace".into(),
+            ));
+        }
+        let store = self;
+        let project = store
+            .get_session(session, user)
+            .await?
+            .project_id
+            .unwrap_or(0);
+        if project != 0 {
+            store.get_project(project, user).await?;
+        }
+        let mut scope = vec![
+            DbValue::Int(user.get()),
+            DbValue::Int(project),
+            DbValue::Text(plugin.into()),
+            DbValue::Text(request.collection.clone()),
+        ];
+        let mut read_id = None;
+        match &request.operation {
+            RecordOperation::Create { value } => {
+                let count = store.db.execute("SELECT COUNT(*) FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=?", &scope[..3]).await?;
+                if count.rows[0].get_int(0)? >= i64::try_from(MAX_RECORDS).unwrap_or(i64::MAX) {
+                    return Err(StorageError::InvalidRequest(
+                        "Plugin record collection is full".into(),
+                    ));
                 }
-                let sql = if let Some(id) = read_id {
-                    scope.push(DbValue::Int(id));
-                    "SELECT id,revision,updated_at,value FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id=?"
-                } else {
-                    let RecordOperation::List {after} = request.operation else { unreachable!("mutation selects its result") };
-                    scope.push(DbValue::Int(after));
-                    "SELECT id,revision,updated_at,value FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id>? ORDER BY id LIMIT 33"
-                };
-                let rows = store.db.execute(sql, &scope).await?;
-                let mut records = rows.rows.iter().map(|row| Ok(Record {
-                    id: row.get_int(0)?, revision: row.get_int(1)?, updated_at: row.get_int(2)?,
-                    value: serde_json::from_str(row.get_text(3)?).map_err(|error| StorageError::Db(error.to_string()))?,
-                })).collect::<Result<Vec<_>, StorageError>>()?;
-                if read_id.is_some() && records.is_empty() { return Err(StorageError::NotFound("plugin record".into())); }
-                let next = if records.len() > 32 { records.truncate(32); records.last().map(|record| record.id) } else { None };
-                Ok(RecordResult {records, next})
-            }).await
-        })
+                let mut values = scope.clone();
+                values.extend([DbValue::Text(value.to_string()), DbValue::Int(now)]);
+                read_id = Some(store.db.execute("INSERT INTO plugin_records(user_id,project_scope,plugin,collection,value,updated_at) VALUES(?,?,?,?,?,?)", &values).await?.last_insert_rowid);
+            }
+            RecordOperation::Update {
+                id,
+                revision,
+                value,
+            } => {
+                let mut values = vec![DbValue::Text(value.to_string()), DbValue::Int(now)];
+                values.extend(scope.clone());
+                values.extend([DbValue::Int(*id), DbValue::Int(*revision)]);
+                let changed = store.db.execute("UPDATE plugin_records SET value=?,updated_at=?,revision=revision+1 WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id=? AND revision=?", &values).await?;
+                if changed.changes != 1 {
+                    return Err(StorageError::Conflict(
+                        "Record changed or is unavailable".into(),
+                    ));
+                }
+                read_id = Some(*id);
+            }
+            RecordOperation::Delete { id, revision } => {
+                scope.extend([DbValue::Int(*id), DbValue::Int(*revision)]);
+                let changed = store.db.execute("DELETE FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id=? AND revision=?", &scope).await?;
+                if changed.changes != 1 {
+                    return Err(StorageError::Conflict(
+                        "Record changed or is unavailable".into(),
+                    ));
+                }
+                return Ok(RecordResult {
+                    records: Vec::new(),
+                    next: None,
+                });
+            }
+            RecordOperation::Read { id } => read_id = Some(*id),
+            RecordOperation::List { .. } => (),
+        }
+        let sql = if let Some(id) = read_id {
+            scope.push(DbValue::Int(id));
+            "SELECT id,revision,updated_at,value FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id=?"
+        } else {
+            let RecordOperation::List { after } = request.operation else {
+                unreachable!("mutation selects its result")
+            };
+            scope.push(DbValue::Int(after));
+            "SELECT id,revision,updated_at,value FROM plugin_records WHERE user_id=? AND project_scope=? AND plugin=? AND collection=? AND id>? ORDER BY id LIMIT 33"
+        };
+        let rows = store.db.execute(sql, &scope).await?;
+        let mut records = rows
+            .rows
+            .iter()
+            .map(|row| {
+                Ok(Record {
+                    id: row.get_int(0)?,
+                    revision: row.get_int(1)?,
+                    updated_at: row.get_int(2)?,
+                    value: serde_json::from_str(row.get_text(3)?)
+                        .map_err(|error| StorageError::Db(error.to_string()))?,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        if read_id.is_some() && records.is_empty() {
+            return Err(StorageError::NotFound("plugin record".into()));
+        }
+        let next = if records.len() > 32 {
+            records.truncate(32);
+            records.last().map(|record| record.id)
+        } else {
+            None
+        };
+        Ok(RecordResult { records, next })
     }
 }
 

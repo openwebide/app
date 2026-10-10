@@ -62,6 +62,8 @@ enum Route {
     ProjectSkillCommand,
     GetSessionSkills,
     SessionSkillCommand,
+    PluginExecutionGrants,
+    PluginHostRequest,
     ListProjects,
     ListPlugins,
     ListMarketplaces,
@@ -226,6 +228,12 @@ fn resolve(method: &str, segments: &[&str]) -> Option<Route> {
         ("POST", ["projects", id, "skills"]) if numeric_id(id) => Some(Route::ProjectSkillCommand),
         ("GET", ["sessions", id, "skills"]) if numeric_id(id) => Some(Route::GetSessionSkills),
         ("POST", ["sessions", id, "skills"]) if numeric_id(id) => Some(Route::SessionSkillCommand),
+        ("POST", ["sessions", id, "plugin-grants"]) if numeric_id(id) => {
+            Some(Route::PluginExecutionGrants)
+        }
+        ("POST", ["sessions", id, "plugin-host"]) if numeric_id(id) => {
+            Some(Route::PluginHostRequest)
+        }
         ("GET", ["projects"]) => Some(Route::ListProjects),
         ("GET", ["plugin-marketplaces"]) => Some(Route::ListMarketplaces),
         ("POST", ["plugin-marketplaces"]) => Some(Route::SaveMarketplaces),
@@ -478,6 +486,12 @@ pub async fn route(req: Request) -> JsonResp {
         }
         (Some(Route::SessionMemoryCommand), Some(user)) => {
             api::memories::command(req, &state, &path, user, true).await
+        }
+        (Some(Route::PluginExecutionGrants), Some(user)) => {
+            api::plugins::grant_execution(req, &state, &path, user).await
+        }
+        (Some(Route::PluginHostRequest), Some(user)) => {
+            api::plugins::host_request(req, &state, &path, user).await
         }
         (Some(Route::GetProjectSkills), Some(user)) => {
             api::skills::get(&state, &path, user, false).await
@@ -987,6 +1001,8 @@ mod tests {
                 Route::ListPlugins,
                 Route::RecordPlugin,
                 Route::PreparePlugin,
+                Route::PluginExecutionGrants,
+                Route::PluginHostRequest,
                 Route::GetProjectSkills,
                 Route::ProjectSkillCommand,
                 Route::GetSessionSkills,
@@ -1038,6 +1054,12 @@ mod tests {
             ("POST", "projects/5/skills", Route::ProjectSkillCommand),
             ("GET", "sessions/5/skills", Route::GetSessionSkills),
             ("POST", "sessions/5/skills", Route::SessionSkillCommand),
+            (
+                "POST",
+                "sessions/5/plugin-grants",
+                Route::PluginExecutionGrants,
+            ),
+            ("POST", "sessions/5/plugin-host", Route::PluginHostRequest),
             ("GET", "projects/5/memories", Route::GetProjectMemories),
             ("POST", "projects/5/memories", Route::ProjectMemoryCommand),
             ("GET", "sessions/5/memories", Route::GetSessionMemories),

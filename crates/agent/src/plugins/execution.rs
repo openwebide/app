@@ -27,6 +27,37 @@ pub trait PluginServices: Send + Sync {
         payload: &str,
     ) -> impl Future<Output = Result<String, String>> + Send;
 }
+pub trait GrantedHost: Send + Sync {
+    fn request(
+        &self,
+        request: &openwebide_core::plugins::execution::PluginHostRequest,
+    ) -> impl Future<Output = Result<String, String>> + Send;
+}
+/// Both run adapters attach opaque authority using this shared policy.
+pub struct GrantedServices<S> {
+    pub host: S,
+    pub grants: Arc<std::collections::BTreeMap<String, String>>,
+}
+impl<S: GrantedHost> PluginServices for GrantedServices<S> {
+    async fn request(
+        &self,
+        plugin: &PreparedPlugin,
+        capability: &str,
+        payload: &str,
+    ) -> Result<String, String> {
+        let grant = self
+            .grants
+            .get(&plugin.digest)
+            .ok_or("Plugin execution grant is unavailable")?;
+        self.host
+            .request(&openwebide_core::plugins::execution::PluginHostRequest {
+                grant: grant.clone(),
+                capability: capability.into(),
+                payload: payload.into(),
+            })
+            .await
+    }
+}
 /// Manifest requirements add to host policy; they never waive it.
 pub struct PluginGate<G> {
     pub gate: G,
@@ -471,5 +502,37 @@ mod tests {
             plugins: Arc::new(vec![plugin]),
         };
         assert!(gate.needs_approval(&call));
+    }
+    #[test]
+    fn shared_services_attach_pinned_authority_without_exposing_it_to_plugins() {
+        struct Host(Mutex<Vec<openwebide_core::plugins::execution::PluginHostRequest>>);
+        impl GrantedHost for Host {
+            async fn request(
+                &self,
+                request: &openwebide_core::plugins::execution::PluginHostRequest,
+            ) -> Result<String, String> {
+                self.0.lock().unwrap().push(request.clone());
+                Ok("{}".into())
+            }
+        }
+        let plugin = plugin();
+        let services = GrantedServices {
+            host: Host(Mutex::new(Vec::new())),
+            grants: Arc::new(
+                [(plugin.digest.clone(), "opaque-grant".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+        };
+        block_on(services.request(&plugin, "records", "{\"operation\":{\"action\":\"list\"}}"))
+            .unwrap();
+        let mut other = plugin.clone();
+        other.digest = "c".repeat(64);
+        assert!(block_on(services.request(&other, "records", "{}")).is_err());
+        let calls = services.host.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].grant, "opaque-grant");
+        assert_eq!(calls[0].capability, "records");
+        assert!(!calls[0].payload.contains("opaque-grant"));
     }
 }

@@ -17,9 +17,7 @@ pub trait RunBackend: Send + Sync {
         &self,
         _user: i64,
         _session: i64,
-        _plugin: &openwebide_core::plugins::PreparedPlugin,
-        _capability: &str,
-        _payload: &str,
+        _request: &openwebide_core::plugins::execution::PluginHostRequest,
     ) -> impl Future<Output = Result<String, String>> + Send {
         async { Err("Plugin host capability unavailable".into()) }
     }
@@ -375,6 +373,20 @@ pub fn encode_query(s: &str) -> String {
 }
 
 impl RunBackend for BackendClient {
+    async fn plugin_request(
+        &self,
+        user: i64,
+        session: i64,
+        request: &openwebide_core::plugins::execution::PluginHostRequest,
+    ) -> Result<String, String> {
+        self.call(
+            user,
+            "POST",
+            &format!("/sessions/{session}/plugin-host"),
+            json!(request),
+        )
+        .await
+    }
     async fn host_journal(
         &self,
         command: &openwebide_core::host_admin::HostJournalCommand,

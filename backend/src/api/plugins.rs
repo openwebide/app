@@ -2,6 +2,68 @@
 use super::*;
 use openwebide_core::plugins::{PluginSource, PreparedPlugin, RecordPlugin};
 
+pub(crate) async fn execution_grants(
+    state: &AppState,
+    user: openwebide_core::UserId,
+    session: i64,
+    plugins: &[PreparedPlugin],
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
+    state.store.get_session(session, user).await?;
+    if plugins.len() > 64 {
+        return Err(ApiError::bad_request("Too many executable plugins"));
+    }
+    let mut grants = std::collections::BTreeMap::new();
+    for plugin in plugins {
+        let token = format!("{:032x}", rand::random::<u128>());
+        state
+            .store
+            .issue_plugin_grant(user, session, plugin, &token, now())
+            .await?;
+        if grants.insert(plugin.digest.clone(), token).is_some() {
+            return Err(ApiError::bad_request("Duplicate executable plugin"));
+        }
+    }
+    Ok(grants)
+}
+pub(crate) async fn grant_execution(
+    req: Request,
+    state: &AppState,
+    path: &str,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    let session = path_id(
+        path.strip_suffix("/plugin-grants")
+            .ok_or_else(|| ApiError::bad_request("Expected plugin grant path"))?,
+        "/api/sessions",
+    )?;
+    let plugins: Vec<PreparedPlugin> = parse_json(read_body(req, 256 * 1024).await?)?;
+    Ok(json_response(
+        200,
+        &execution_grants(state, user.id, session, &plugins).await?,
+    ))
+}
+pub(crate) async fn host_request(
+    req: Request,
+    state: &AppState,
+    path: &str,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    let session = path_id(
+        path.strip_suffix("/plugin-host")
+            .ok_or_else(|| ApiError::bad_request("Expected plugin host path"))?,
+        "/api/sessions",
+    )?;
+    let request: openwebide_core::plugins::execution::PluginHostRequest =
+        parse_json(read_body(req, 256 * 1024).await?)?;
+    Ok(json_response(
+        200,
+        &state
+            .store
+            .plugin_host_request(user.id, session, &request, now())
+            .await?,
+    ))
+}
+
 pub(crate) async fn list(state: &AppState, user: AuthedUser) -> Result<JsonResp, ApiError> {
     ensure_bundled_plugins(state, user.id).await;
     Ok(json_response(
