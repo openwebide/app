@@ -1258,6 +1258,18 @@ impl BackendApi {
         );
         self.post(&path, source).await
     }
+    pub async fn plugin_preparation(
+        &self,
+        project: Option<i64>,
+        command: &openwebide_core::plugins::preparation::PreparationCommand,
+    ) -> Result<openwebide_core::plugins::preparation::PluginPreparation, String> {
+        command.validate().map_err(|error| error.to_string())?;
+        let path = project.map_or_else(
+            || "/plugins/preparation".into(),
+            |id| format!("/projects/{id}/plugins/preparation"),
+        );
+        self.request(Method::POST, &path, Some(command), true).await
+    }
     pub async fn record_plugin(
         &self,
         request: &openwebide_core::plugins::RecordPlugin,

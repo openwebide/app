@@ -98,15 +98,22 @@ impl ActionHost {
 impl PluginActionHost for ActionHost {
     async fn prepare(&self, plugin: &PreparedPlugin) -> Result<PreparedPlugin, String> {
         SendWrapper::new(async move {
-            match &*self.transport {
+            let transport = match &*self.transport {
                 Transport::Remote(api, project) => {
-                    api.try_with_value(Clone::clone)
-                        .ok_or("Plugin action context changed")?
-                        .prepare_plugin(*project, &plugin.source)
-                        .await
+                    crate::project_plugins::PluginTransport::Remote(*api, *project)
                 }
-                Transport::Local(client) => client.prepare_plugin(&plugin.source).await,
-            }
+                Transport::Local(client) => {
+                    crate::project_plugins::PluginTransport::Local(client.clone())
+                }
+            };
+            crate::project_plugins::prepare_on_host(
+                transport,
+                &plugin.source,
+                || (self.current)(),
+                || false,
+                |_| {},
+            )
+            .await
         })
         .await
     }

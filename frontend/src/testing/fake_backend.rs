@@ -83,6 +83,14 @@ pub struct FakeBackend {
     pub plugin_loads:
         RefCell<VecDeque<Deferred<Vec<openwebide_core::plugins::PluginInstallation>>>>,
     pub plugin_preparations: RefCell<VecDeque<Deferred<openwebide_core::plugins::PreparedPlugin>>>,
+    pub plugin_progress:
+        RefCell<VecDeque<Deferred<openwebide_core::plugins::preparation::PluginPreparation>>>,
+    pub plugin_preparation_commands: RefCell<
+        Vec<(
+            Option<i64>,
+            openwebide_core::plugins::preparation::PreparationCommand,
+        )>,
+    >,
     pub plugin_requests: RefCell<Vec<(Option<i64>, openwebide_core::plugins::PluginSource)>>,
     pub plugin_records: RefCell<Vec<openwebide_core::plugins::RecordPlugin>>,
     pub questions: RefCell<Vec<openwebide_core::questions::AgentQuestion>>,
@@ -761,6 +769,45 @@ impl Backend for FakeBackend {
                 .find(|binding| binding.prepared.source == *source)
                 .map(|binding| binding.prepared.clone())
                 .ok_or_else(|| "No plugin fixture prepared".into())
+        })
+    }
+    fn plugin_preparation<'a>(
+        &'a self,
+        project: Option<i64>,
+        command: &'a openwebide_core::plugins::preparation::PreparationCommand,
+    ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::preparation::PluginPreparation, String>>
+    {
+        Box::pin(async move {
+            use openwebide_core::plugins::preparation::{
+                PluginPreparation, PreparationCommand, PreparationState,
+            };
+            self.plugin_preparation_commands
+                .borrow_mut()
+                .push((project, command.clone()));
+            let pending = self.plugin_progress.borrow_mut().pop_front();
+            if let Some(pending) = pending {
+                return pending.await.map_err(|error| error.to_string())?;
+            }
+            match command {
+                PreparationCommand::Start { source } => Ok(PluginPreparation {
+                    id: "f".repeat(32),
+                    state: PreparationState::Ready,
+                    prepared: Some(self.prepare_plugin(project, source).await?),
+                    error: None,
+                }),
+                PreparationCommand::Status { id } => Ok(PluginPreparation {
+                    id: id.clone(),
+                    state: PreparationState::Preparing,
+                    prepared: None,
+                    error: None,
+                }),
+                PreparationCommand::Cancel { id } => Ok(PluginPreparation {
+                    id: id.clone(),
+                    state: PreparationState::Cancelled,
+                    prepared: None,
+                    error: None,
+                }),
+            }
         })
     }
     fn record_plugin<'a>(

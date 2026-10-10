@@ -84,6 +84,7 @@ enum Route {
     PluginPackage,
     RecordPlugin,
     PreparePlugin,
+    PluginPreparation,
     GetEditorRecovery,
     SaveEditorRecovery,
     CreateProject,
@@ -269,6 +270,10 @@ fn resolve(method: &str, segments: &[&str]) -> Option<Route> {
         ("GET", ["plugins"]) => Some(Route::ListPlugins),
         ("POST", ["plugins"]) => Some(Route::RecordPlugin),
         ("POST", ["plugins", "prepare"]) => Some(Route::PreparePlugin),
+        ("POST", ["plugins", "preparation"]) => Some(Route::PluginPreparation),
+        ("POST", ["projects", id, "plugins", "preparation"]) if numeric_id(id) => {
+            Some(Route::PluginPreparation)
+        }
         ("POST", ["plugins", "package"]) => Some(Route::PluginPackage),
         ("POST", ["projects", id, "plugins", "prepare"]) if numeric_id(id) => {
             Some(Route::PreparePlugin)
@@ -561,6 +566,9 @@ pub async fn route(req: Request) -> JsonResp {
         (Some(Route::RecordPlugin), Some(user)) => api::plugins::record(req, &state, user).await,
         (Some(Route::PreparePlugin), Some(user)) => {
             api::plugins::prepare(req, &state, &path, user).await
+        }
+        (Some(Route::PluginPreparation), Some(user)) => {
+            api::plugins::preparation(req, &state, &path, user).await
         }
         (Some(Route::ProjectSkillCommand), Some(user)) => {
             api::skills::command(req, &state, &path, user, false).await
@@ -1049,6 +1057,7 @@ mod tests {
                 Route::ListPlugins,
                 Route::RecordPlugin,
                 Route::PreparePlugin,
+                Route::PluginPreparation,
                 Route::PluginExecutionGrants,
                 Route::PluginHostRequest,
                 Route::PluginContextGrants,
@@ -1241,6 +1250,12 @@ mod tests {
             ("POST", "plugins", Route::RecordPlugin),
             ("POST", "projects/5/plugins/prepare", Route::PreparePlugin),
             ("POST", "plugins/prepare", Route::PreparePlugin),
+            ("POST", "plugins/preparation", Route::PluginPreparation),
+            (
+                "POST",
+                "projects/5/plugins/preparation",
+                Route::PluginPreparation,
+            ),
             ("POST", "plugins/package", Route::PluginPackage),
             ("GET", "git/status", Route::GitGet),
             ("GET", "git/path-status", Route::GitGet),

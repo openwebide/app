@@ -651,6 +651,14 @@ pub trait Backend {
     ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::PreparedPlugin, String>> {
         Box::pin(async { Err("Plugin installation is unavailable".into()) })
     }
+    fn plugin_preparation<'a>(
+        &'a self,
+        _project: Option<i64>,
+        _command: &'a openwebide_core::plugins::preparation::PreparationCommand,
+    ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::preparation::PluginPreparation, String>>
+    {
+        Box::pin(async { Err("Plugin preparation is unavailable".into()) })
+    }
     fn record_plugin<'a>(
         &'a self,
         _request: &'a openwebide_core::plugins::RecordPlugin,
@@ -1641,6 +1649,14 @@ impl Backend for BackendApi {
         source: &'a openwebide_core::plugins::PluginSource,
     ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::PreparedPlugin, String>> {
         Box::pin(BackendApi::prepare_plugin(self, project, source))
+    }
+    fn plugin_preparation<'a>(
+        &'a self,
+        project: Option<i64>,
+        command: &'a openwebide_core::plugins::preparation::PreparationCommand,
+    ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::preparation::PluginPreparation, String>>
+    {
+        Box::pin(BackendApi::plugin_preparation(self, project, command))
     }
     fn record_plugin<'a>(
         &'a self,

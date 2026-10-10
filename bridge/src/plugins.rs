@@ -1067,10 +1067,32 @@ mod bundled_tests {
                         .unwrap()
                         .is_some()
                 );
-                let prepared = installer
-                    .prepare("owner", host.into(), source)
+                let started = installer
+                    .preparations
+                    .start(
+                        installer.clone(),
+                        "owner".into(),
+                        host.into(),
+                        source.clone(),
+                    )
                     .await
                     .unwrap();
+                let prepared = tokio::time::timeout(Duration::from_secs(120), async {
+                    loop {
+                        let status = installer.preparations.status("owner", &started.id).await.unwrap();
+                        status.validate().unwrap();
+                        match status.state {
+                            openwebide_core::plugins::preparation::PreparationState::Ready => {
+                                break status.prepared.unwrap();
+                            }
+                            openwebide_core::plugins::preparation::PreparationState::Queued
+                            | openwebide_core::plugins::preparation::PreparationState::Preparing => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            _ => panic!("Bundled source preparation failed: {status:?}"),
+                        }
+                    }
+                }).await.unwrap();
                 let package = installer
                     .package("owner", host.into(), &prepared)
                     .await

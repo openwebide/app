@@ -1309,11 +1309,18 @@ impl openwebide_agent::plugins::execution::PluginTransport for BrowserPluginTran
         expected: &openwebide_core::plugins::PreparedPlugin,
     ) -> Result<openwebide_core::plugins::PreparedPlugin, String> {
         SendWrapper::new(async move {
-            self.0
+            let client = self
+                .0
                 .as_ref()
-                .ok_or("Connect this project's execution host first.")?
-                .prepare_plugin(&expected.source)
-                .await
+                .ok_or("Connect this project's execution host first.")?;
+            crate::project_plugins::prepare_on_host(
+                crate::project_plugins::PluginTransport::Local(client.clone()),
+                &expected.source,
+                || true,
+                || false,
+                |_| {},
+            )
+            .await
         })
         .await
     }

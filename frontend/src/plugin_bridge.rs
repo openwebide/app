@@ -49,6 +49,17 @@ impl PluginBridgeClient {
         self.plugin_request("prepare", serde_json::json!({"source": source}))
             .await
     }
+    pub async fn preparation(
+        &self,
+        command: &openwebide_core::plugins::preparation::PreparationCommand,
+    ) -> Result<openwebide_core::plugins::preparation::PluginPreparation, String> {
+        command.validate().map_err(|error| error.to_string())?;
+        self.plugin_request(
+            &format!("prepare/{}", command.operation()),
+            command.host_payload(),
+        )
+        .await
+    }
 
     pub async fn plugin_package(&self, expected: &PreparedPlugin) -> Result<PluginPackage, String> {
         self.plugin_request("package", serde_json::json!({"prepared": expected}))

@@ -11,19 +11,32 @@ use crate::{
 use leptos::{prelude::*, task::spawn_local};
 use openwebide_core::plugins::{marketplace::*, *};
 
-enum PluginTransport {
+#[derive(Clone)]
+pub(crate) enum PluginTransport {
     Remote(Api, Option<i64>),
     Local(PluginBridgeClient),
 }
 impl PluginTransport {
-    async fn prepare(&self, source: &PluginSource) -> Result<PreparedPlugin, String> {
-        match self {
-            Self::Remote(api, id) => {
-                api.with_value(Clone::clone)
-                    .prepare_plugin(*id, source)
-                    .await
+    async fn preparation(
+        &self,
+        command: &preparation::PreparationCommand,
+    ) -> Result<preparation::PluginPreparation, String> {
+        let request = async {
+            match self {
+                Self::Remote(api, id) => {
+                    api.try_with_value(Clone::clone)
+                        .ok_or("Plugin host context changed")?
+                        .plugin_preparation(*id, command)
+                        .await
+                }
+                Self::Local(client) => client.preparation(command).await,
             }
-            Self::Local(client) => client.prepare_plugin(source).await,
+        };
+        let timeout = crate::util::sleep_ms(30_000);
+        futures::pin_mut!(request, timeout);
+        match futures::future::select(request, timeout).await {
+            futures::future::Either::Left((result, _)) => result,
+            futures::future::Either::Right(_) => Err("Plugin host request timed out.".into()),
         }
     }
     async fn package(&self, expected: &PreparedPlugin) -> Result<PluginPackage, String> {
@@ -34,6 +47,107 @@ impl PluginTransport {
                     .await
             }
             Self::Local(client) => client.plugin_package(expected).await,
+        }
+    }
+}
+
+struct PreparationGuard {
+    transport: PluginTransport,
+    id: Option<String>,
+}
+impl Drop for PreparationGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            let transport = self.transport.clone();
+            spawn_local(async move {
+                let _ = transport
+                    .preparation(&preparation::PreparationCommand::Cancel { id })
+                    .await;
+            });
+        }
+    }
+}
+
+/// One preparation policy for installation and cold action caches on either host.
+pub(crate) async fn prepare_on_host(
+    transport: PluginTransport,
+    source: &PluginSource,
+    current: impl Fn() -> bool,
+    cancelled: impl Fn() -> bool,
+    progress: impl Fn(preparation::PreparationState),
+) -> Result<PreparedPlugin, String> {
+    use preparation::{PreparationCommand, PreparationState};
+    if !current() || cancelled() {
+        return Err("Plugin preparation was cancelled.".into());
+    }
+    let mut guard = PreparationGuard {
+        transport,
+        id: None,
+    };
+    let clock = web_sys::window()
+        .and_then(|window| window.performance())
+        .ok_or("Plugin preparation clock is unavailable")?;
+    let started = clock.now();
+    progress(PreparationState::Queued);
+    let mut status = guard
+        .transport
+        .preparation(&PreparationCommand::Start {
+            source: source.clone(),
+        })
+        .await?;
+    status.validate().map_err(|error| error.to_string())?;
+    guard.id = Some(status.id.clone());
+    loop {
+        if clock.now() - started >= 900_000.0 {
+            return Err("Plugin preparation exceeded its time limit.".into());
+        }
+        if !current() || cancelled() {
+            return Err("Plugin preparation was cancelled.".into());
+        }
+        progress(status.state);
+        match status.state {
+            PreparationState::Ready => {
+                let prepared = status.prepared.ok_or("Missing prepared plugin receipt")?;
+                if prepared.source != *source {
+                    return Err("Plugin host returned a different source.".into());
+                }
+                guard.id = None;
+                return Ok(prepared);
+            }
+            PreparationState::Failed => {
+                return Err(status
+                    .error
+                    .unwrap_or_else(|| "Plugin preparation failed.".into()));
+            }
+            PreparationState::Cancelled => return Err("Plugin preparation was cancelled.".into()),
+            PreparationState::Queued | PreparationState::Preparing => {}
+        }
+        crate::util::sleep_ms(250).await;
+        if !current() || cancelled() {
+            return Err("Plugin preparation was cancelled.".into());
+        }
+        let id = guard
+            .id
+            .clone()
+            .ok_or("Plugin preparation is unavailable")?;
+        let command = PreparationCommand::Status { id: id.clone() };
+        let request = guard.transport.preparation(&command);
+        let invalidation = async {
+            loop {
+                if !current() || cancelled() {
+                    return Err("Plugin preparation was cancelled.".to_string());
+                }
+                crate::util::sleep_ms(50).await;
+            }
+        };
+        futures::pin_mut!(request, invalidation);
+        status = match futures::future::select(request, invalidation).await {
+            futures::future::Either::Left((result, _)) => result?,
+            futures::future::Either::Right((result, _)) => return result,
+        };
+        status.validate().map_err(|error| error.to_string())?;
+        if status.id != id {
+            return Err("Plugin host returned a different preparation.".into());
         }
     }
 }
@@ -134,6 +248,8 @@ impl ProjectPluginActions {
             };
             let project = projects.active_project.get_untracked();
             state.busy.set(true);
+            state.preparation.set(None);
+            state.cancel_preparation.set(false);
             state.error.set(None);
             spawn_local(async move {
                 let refresh_skills = matches!(
@@ -153,8 +269,11 @@ impl ProjectPluginActions {
                     return;
                 }
                 state.busy.set(false);
+                state.preparation.set(None);
                 if let Err(error) = result {
-                    state.error.set(Some(error));
+                    if !state.cancel_preparation.get_untracked() {
+                        state.error.set(Some(error));
+                    }
                 } else if refresh_skills && let Some(actions) = skill_actions {
                     actions.refresh.run(());
                 }
@@ -177,6 +296,8 @@ impl ProjectPluginActions {
             state.failures.set(Vec::new());
             state.loaded.set(false);
             state.busy.set(false);
+            state.preparation.set(None);
+            state.cancel_preparation.set(false);
             state.error.set(None);
             state.repository.set(String::new());
             state.commit.set(String::new());
@@ -546,7 +667,24 @@ async fn install_plugin(
     if !current() {
         return Ok(());
     }
-    let prepared = transport.prepare(&source).await?;
+    let prepared = prepare_on_host(
+        transport.clone(),
+        &source,
+        current.clone(),
+        move || state.cancel_preparation.try_get_untracked().unwrap_or(true),
+        {
+            let current = current.clone();
+            move |progress| {
+                if current() {
+                    state.preparation.set(Some(progress));
+                }
+            }
+        },
+    )
+    .await?;
+    if current() {
+        state.preparation.set(None);
+    }
     prepared.validate().map_err(|e| e.to_string())?;
     if prepared.source != source {
         return Err("Plugin host returned a different source.".into());
@@ -619,7 +757,7 @@ async fn update_plugins(
         .into_iter()
         .filter(|update| !automatic_only || update.automatic)
     {
-        if !current() {
+        if !current() || state.cancel_preparation.get_untracked() {
             return Ok(());
         }
         let name = update.installation.prepared.manifest.display_name.clone();
@@ -638,6 +776,9 @@ async fn update_plugins(
         )
         .await
         {
+            if !current() || state.cancel_preparation.get_untracked() {
+                return Ok(());
+            }
             failures.push(format!("{name}: {error}"));
         }
     }

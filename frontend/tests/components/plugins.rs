@@ -9,6 +9,151 @@ use std::{cell::Cell, rc::Rc};
 use wasm_bindgen_test::*;
 
 #[wasm_bindgen_test]
+async fn plugins_poll_host_preparation_and_cancel_pending_requests_without_recording_stale_receipts()
+ {
+    use super::support::wait_until;
+    use openwebide_core::plugins::preparation::{
+        PluginPreparation, PreparationCommand, PreparationState,
+    };
+    for boundary in ["cancel", "account", "success", "wrong-id"] {
+        let fake = Rc::new(FakeBackend::default());
+        let captured = Rc::new(Cell::new(None));
+        let slot = captured.clone();
+        let mounted = mount_test_with_backend(fake.clone(), move |state| {
+            state.seed_project();
+            state.auth.set_user(User {
+                id: UserId::new(1),
+                username: "test".into(),
+                role: UserRole::User,
+                created_at: 0,
+            });
+            let plugins = PluginsState::default();
+            let host = ProjectHost::new(state.api, state.projects, state.settings, state.auth);
+            let actions = ProjectPluginActions::new(
+                state.api,
+                plugins,
+                host,
+                state.auth,
+                state.projects,
+                state.chat,
+                state.settings,
+            );
+            slot.set(Some((plugins, actions)));
+            provide_context(plugins);
+            provide_context(actions);
+            view! {<openwebide_frontend::components::Plugins/>}
+        });
+        settle().await;
+        let (plugins, actions) = captured.get().unwrap();
+        let prepared = receipt();
+        let id = "a".repeat(32);
+        for state in [PreparationState::Queued, PreparationState::Preparing] {
+            let (send, receive) = futures::channel::oneshot::channel();
+            send.send(Ok(PluginPreparation {
+                id: id.clone(),
+                state,
+                prepared: None,
+                error: None,
+            }))
+            .unwrap();
+            fake.plugin_progress.borrow_mut().push_back(receive);
+        }
+        let (send, receive) = futures::channel::oneshot::channel();
+        fake.plugin_progress.borrow_mut().push_back(receive);
+        plugins.repository.set(prepared.source.repository.clone());
+        plugins.commit.set(prepared.source.commit.clone());
+        plugins.path.set(prepared.source.path.clone());
+        actions.install.run(());
+        wait_until("pending host preparation status", || {
+            fake.plugin_preparation_commands
+                .borrow()
+                .iter()
+                .filter(|(_, command)| matches!(command, PreparationCommand::Status { .. }))
+                .count()
+                == 2
+        })
+        .await;
+        assert!(plugins.busy.get_untracked());
+        assert!(
+            mounted
+                .root
+                .text_content()
+                .unwrap()
+                .contains("Preparing plugin on host")
+        );
+        assert!(
+            mounted
+                .root
+                .text_content()
+                .unwrap()
+                .contains("Cancel installation")
+        );
+        match boundary {
+            "cancel" => mounted.click_text("Cancel installation"),
+            "account" => mounted.state.auth.logout(),
+            _ => {
+                if boundary == "success" {
+                    let (package_send, receive) = futures::channel::oneshot::channel();
+                    package_send
+                        .send(Ok(openwebide_core::plugins::testing::package()))
+                        .unwrap();
+                    fake.plugin_packages.borrow_mut().push_back(receive);
+                }
+                send.send(Ok(PluginPreparation {
+                    id: if boundary == "wrong-id" {
+                        "b".repeat(32)
+                    } else {
+                        id.clone()
+                    },
+                    state: PreparationState::Ready,
+                    prepared: Some(prepared),
+                    error: None,
+                }))
+                .unwrap();
+                wait_until("finished host preparation", || {
+                    !plugins.busy.get_untracked()
+                })
+                .await;
+                if boundary == "wrong-id" {
+                    assert!(
+                        plugins
+                            .error
+                            .get_untracked()
+                            .unwrap()
+                            .contains("different preparation")
+                    );
+                    assert!(fake.plugin_records.borrow().is_empty());
+                } else {
+                    assert!(plugins.error.get_untracked().is_none());
+                    assert_eq!(fake.plugin_records.borrow().len(), 1);
+                    assert_eq!(plugins.installations.get_untracked().len(), 1);
+                    assert!(
+                        !fake.plugin_preparation_commands.borrow().iter().any(
+                            |(_, command)| matches!(command, PreparationCommand::Cancel { .. })
+                        )
+                    );
+                }
+                continue;
+            }
+        }
+        wait_until("host cancellation after request invalidation", || fake.plugin_preparation_commands.borrow()
+            .iter().any(|(_,command)|matches!(command, PreparationCommand::Cancel { id: cancelled } if cancelled == &id))).await;
+        assert!(fake.plugin_records.borrow().is_empty());
+        assert!(
+            send.send(Ok(PluginPreparation {
+                id,
+                state: PreparationState::Ready,
+                prepared: Some(prepared),
+                error: None
+            }))
+            .is_err(),
+            "The pending status request must be dropped"
+        );
+        assert!(plugins.preparation.get_untracked().is_none());
+    }
+}
+
+#[wasm_bindgen_test]
 async fn plugins_review_new_capabilities_before_recording_updates_and_clear_stale_reviews() {
     use openwebide_core::plugins::{
         PluginPackage, PluginTool, PluginUpdatePolicy, RecordPlugin, RustPlugin,
@@ -245,6 +390,10 @@ async fn plugins_guard_preparation_before_recording_on_account_project_and_host_
         actions.install.run(());
         settle().await;
         if boundary == "unpaired" {
+            super::support::wait_until("unpaired plugin host failure", || {
+                !plugins.busy.get_untracked() && plugins.error.get_untracked().is_some()
+            })
+            .await;
             assert!(fake.plugin_requests.borrow().is_empty());
             assert!(plugins.error.get_untracked().is_some());
             continue;

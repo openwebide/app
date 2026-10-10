@@ -22,6 +22,8 @@ pub struct PluginsState {
     pub commit: RwSignal<String>,
     pub path: RwSignal<String>,
     pub busy: RwSignal<bool>,
+    pub preparation: RwSignal<Option<openwebide_core::plugins::preparation::PreparationState>>,
+    pub cancel_preparation: RwSignal<bool>,
     pub loaded: RwSignal<bool>,
     pub error: RwSignal<Option<String>>,
 }
@@ -50,6 +52,8 @@ impl Default for PluginsState {
             commit: RwSignal::new(String::new()),
             path: RwSignal::new(".".into()),
             busy: RwSignal::new(false),
+            preparation: RwSignal::new(None),
+            cancel_preparation: RwSignal::new(false),
             loaded: RwSignal::new(false),
             error: RwSignal::new(None),
         }

@@ -62,6 +62,14 @@ export function fakeBridgeHttp() {
         const body = JSON.parse((await request.text()) || '{}');
         const path = new URL(request.url).pathname;
         mock.calls.push({ path, body, authorization: request.headers.get('Authorization') });
+        if (path.startsWith('/plugins/prepare/')) {
+            if (mock.invalid) return new Response(JSON.stringify({error:'preparation failed'}), {status:400});
+            const id = body.id || 'a'.repeat(32);
+            const plugin = JSON.parse(mock.plugin);
+            if (path.endsWith('/start')) return new Response(JSON.stringify({id, state:'queued', prepared:null, error:null}));
+            if (path.endsWith('/cancel')) return new Response(JSON.stringify({id, state:'cancelled', prepared:null, error:null}));
+            return new Response(JSON.stringify({id, state:'ready', prepared:plugin.prepared || plugin, error:null}));
+        }
         if (path === '/plugins/prepare' || path === '/plugins/package') { const plugin = JSON.parse(mock.plugin); return mock.invalid ? new Response(JSON.stringify({error:'preparation failed'}), {status:400}) : new Response(JSON.stringify(path === '/plugins/prepare' ? (plugin.prepared || plugin) : plugin)); }
         if (path === '/plugins/invoke') {
             mock.actor = body.call;

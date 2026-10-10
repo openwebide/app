@@ -406,6 +406,55 @@ pub(crate) async fn prepare(
     Ok(json_response(200, &prepared))
 }
 
+pub(crate) async fn preparation(
+    req: Request,
+    state: &AppState,
+    path: &str,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    use openwebide_core::plugins::preparation::{PluginPreparation, PreparationCommand};
+    if path != "/api/plugins/preparation" {
+        let project = path_id(
+            path.strip_suffix("/plugins/preparation")
+                .ok_or_else(|| ApiError::bad_request("Expected plugin preparation path"))?,
+            "/api/projects",
+        )?;
+        super::files::remote_project_path(state, user.id, project, "").await?;
+    }
+    let command: PreparationCommand = parse_json(read_body(req, 16 * 1024).await?)?;
+    command
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let mut payload = command.host_payload();
+    payload["user"] = json!(user.id.get());
+    let (status, body) = crate::bridge::send(
+        &state.store,
+        &format!("/plugins/prepare/{}", command.operation()),
+        payload.to_string(),
+    )
+    .await?;
+    if status != 200 {
+        return Err(if status == 400 {
+            ApiError::bad_request(String::from_utf8_lossy(&body))
+        } else {
+            ApiError::bad_gateway("Plugin preparation is unavailable on the execution host.")
+        });
+    }
+    let progress: PluginPreparation =
+        serde_json::from_slice(&body).map_err(|error| ApiError::internal(error.to_string()))?;
+    progress
+        .validate()
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if let PreparationCommand::Status { id } | PreparationCommand::Cancel { id } = command
+        && progress.id != id
+    {
+        return Err(ApiError::internal(
+            "Plugin host returned a different preparation.",
+        ));
+    }
+    Ok(json_response(200, &progress))
+}
+
 use openwebide_core::plugins::{PluginPackage, ProjectPluginCommand, RemovePlugin, marketplace::*};
 pub(crate) async fn marketplaces(state: &AppState, user: AuthedUser) -> Result<JsonResp, ApiError> {
     Ok(json_response(

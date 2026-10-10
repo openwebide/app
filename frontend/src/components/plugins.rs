@@ -57,7 +57,19 @@ pub fn Plugins() -> impl IntoView {
                     }><Icon name=IconName::Settings/><span>"Manage marketplace sources"</span></button>
                 </ActionMenu>
             </PanelSearchRow>
-            <Show when=move ||state.busy.get()><p class="form-hint" role="status">"Working…"</p></Show>
+            <Show when=move ||state.busy.get()><InlineActions>
+                <p class="form-hint" role="status">{move || match state.preparation.get() {
+                    Some(openwebide_core::plugins::preparation::PreparationState::Queued) => "Queued on host…",
+                    Some(openwebide_core::plugins::preparation::PreparationState::Preparing) => "Preparing plugin on host…",
+                    _ => "Working…",
+                }}</p>
+                <Show when=move ||state.preparation.get().is_some()>
+                    <Button variant=ButtonVariant::Ghost disabled=state.cancel_preparation.read_only()
+                        on_click=Callback::new(move |_|state.cancel_preparation.set(true))>
+                        {move ||if state.cancel_preparation.get(){"Cancelling…"}else{"Cancel installation"}}
+                    </Button>
+                </Show>
+            </InlineActions></Show>
             <Show when=move ||state.error.get().is_some()><p class="error" role="alert">{move ||state.error.get().unwrap_or_default()}</p></Show>
             <For each=move ||state.pending_updates.get() key=|update|(update.prepared.source.repository.clone(), update.prepared.source.path.clone(), update.prepared.source.commit.clone()) children=move |update| {
                 let source = StoredValue::new(update.prepared.source.clone());
