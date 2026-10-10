@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Expose existing task and monitor data through scoped SDK collection CRUD with revisions and plugin ownership. Preserve task IDs/history and keep plugin-owned tasks out of legacy dispatch. Add atomic record prerequisites to raw prompt submissions so stale handlers cannot queue new work after an edit or deletion; Scheduling handlers and deployment remain in progress.
+
 - Let executable plugins choose origin-bound or project-scoped durable events, preserving model pins while allowing saved work to outlive its creating chat. Add bounded, read-only conversation metadata through the shared collections SDK; target selection remains in plugin source. Executable Scheduling and deployed defaults remain in progress.
 
 - Deliver declared plugin completion events atomically with terminal raw-run status, including cancellation, preflight failures and interrupted-host recovery. Reserve event capacity on submission, pin the submitting source version, preserve released callbacks during history cleanup and reuse shared leased event delivery. Executable Scheduling and deployed defaults remain in progress.

@@ -17,6 +17,7 @@ struct Fixture {
 impl Fixture {
     fn completion_submission() -> RunRequest {
         RunRequest::Submit {
+            prerequisites: Vec::new(),
             completion: Some(RunCompletion {
                 event: "due".into(),
                 payload: json!({"task":"my-task"}),
@@ -159,6 +160,7 @@ impl Fixture {
     }
     fn submission(key: &str) -> RunRequest {
         RunRequest::Submit {
+            prerequisites: Vec::new(),
             key: key.into(),
             prompt: "Plugin-owned prompt".into(),
             target: RunTarget::Origin,
@@ -658,6 +660,7 @@ fn raw_submissions_are_owned_idempotent_cancellable_and_queue_atomic_in_both_mod
                 .id;
             for session in [owned, sibling] {
                 let request = RunRequest::Submit {
+                    prerequisites: Vec::new(),
                     key: format!("cross:{session}"),
                     prompt: "x".into(),
                     target: RunTarget::Session { id: session },
@@ -696,6 +699,7 @@ fn queue_limits_roll_back_new_conversations_and_manual_removal_cancels_submissio
                     .is_empty()
             );
             let new = RunRequest::Submit {
+                prerequisites: Vec::new(),
                 key: "new".into(),
                 prompt: "new conversation".into(),
                 target: RunTarget::New {
@@ -734,6 +738,7 @@ fn queue_limits_roll_back_new_conversations_and_manual_removal_cancels_submissio
             );
             let second = f
                 .request(&RunRequest::Submit {
+                    prerequisites: Vec::new(),
                     key: "deleted".into(),
                     prompt: "x".into(),
                     target: RunTarget::New {
@@ -915,6 +920,7 @@ fn run_models_are_pinned_without_mutating_conversation_and_project_deletion_clea
                 model: "override".into(),
             };
             let command = RunRequest::Submit {
+                prerequisites: Vec::new(),
                 key: "pinned".into(),
                 prompt: "x".into(),
                 target: RunTarget::Origin,
@@ -1606,6 +1612,603 @@ fn conversation_discovery_is_owned_bounded_read_only_and_reports_raw_activity_an
             assert_eq!(global.records.len(), 1);
             assert_eq!(global.records[0].value["name"], "Global");
             assert_eq!(global.records[0].value["origin"], false);
+        }
+    });
+}
+
+#[test]
+fn task_collection_preserves_ids_history_and_cas_while_separating_plugin_policy_from_legacy_dispatch()
+ {
+    use openwebide_core::{
+        plugins::records::CollectionResult,
+        scheduled::{ExecutionHost, Schedule, SessionTarget, TaskCommand, TaskDraft},
+    };
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            f.bind_host(mode).await;
+            let request = |operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":"tasks","operation":operation}).to_string(),
+            };
+            let draft = TaskDraft {
+                session_target: SessionTarget::Existing,
+                auto_title: false,
+                title: "Legacy task".into(),
+                prompt: "Check build".into(),
+                session_id: f.session,
+                model: None,
+                schedule: Schedule::Once { at: 100 },
+                enabled: true,
+            };
+            let legacy = f
+                .store
+                .scheduled_session_command(
+                    f.user,
+                    f.session,
+                    &TaskCommand::Create {
+                        draft: draft.clone(),
+                    },
+                    1,
+                )
+                .await
+                .unwrap()
+                .remove(0);
+            f.store.db.execute("INSERT INTO scheduled_runs(task_id,due_at,status,detail,session_id) VALUES(?,50,'complete','Historic result',?)",&[DbValue::Int(legacy.id),DbValue::Int(f.session)]).await.unwrap();
+            let before = f
+                .store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &request(json!({"action":"read","id":legacy.id})),
+                    2,
+                )
+                .await
+                .unwrap();
+            let before: CollectionResult = serde_json::from_str(&before).unwrap();
+            assert!(before.records[0].value["owner"].is_null());
+            let value = json!({"draft":draft,"next_run":120,"state":{"job":17},"monitor":null});
+            let claimed=f.store.plugin_host_request(f.user,f.session,&request(json!({"action":"update","id":legacy.id,"revision":legacy.revision,"value":value})),3).await.unwrap();
+            let claimed: CollectionResult = serde_json::from_str(&claimed).unwrap();
+            assert_eq!(claimed.records[0].id, legacy.id);
+            assert_eq!(claimed.records[0].revision, legacy.revision + 1);
+            assert_eq!(
+                claimed.records[0].value["owner"],
+                f.plugin.storage_namespace()
+            );
+            assert_eq!(claimed.records[0].value["state"]["job"], 17);
+            assert!(f.store.plugin_host_request(f.user,f.session,&request(json!({"action":"update","id":legacy.id,"revision":legacy.revision,"value":value})),4).await.is_err());
+            let visible = f
+                .store
+                .scheduled_tasks(f.user, Some(f.project), 4)
+                .await
+                .unwrap();
+            assert_eq!(visible[0].id, legacy.id);
+            assert_eq!(
+                visible[0].last_run.as_ref().unwrap().detail,
+                "Historic result"
+            );
+            assert_eq!(visible[0].next_run, Some(120));
+            assert!(
+                f.store
+                    .scheduled_session_command(
+                        f.user,
+                        f.session,
+                        &TaskCommand::SetEnabled {
+                            id: legacy.id,
+                            revision: claimed.records[0].revision,
+                            enabled: false
+                        },
+                        4
+                    )
+                    .await
+                    .is_err()
+            );
+            let host = ExecutionHost {
+                id: f.plugin.host_id.clone(),
+                name: "Host".into(),
+                last_seen: 200,
+            };
+            assert!(f.store.due_scheduled(&host, 200).await.unwrap().is_empty());
+            let visible = f
+                .store
+                .scheduled_tasks(f.user, Some(f.project), 200)
+                .await
+                .unwrap();
+            assert_eq!(visible[0].next_run, Some(120));
+            let mut monitor = value.clone();
+            monitor["draft"]["title"] = json!("Monitor");
+            monitor["next_run"] = json!(15);
+            monitor["monitor"] =
+                json!({"session_id":f.session,"interval_seconds":10,"remaining":1,"expires_at":20});
+            // Expiry and repetition are source decisions; the host only validates record shape.
+            monitor["draft"]["schedule"] =
+                json!({"kind":"cron","expression":"not cron","timezone":"Mars/Base"});
+            let created = f
+                .store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &request(json!({"action":"create","value":monitor})),
+                    5,
+                )
+                .await
+                .unwrap();
+            let created: CollectionResult = serde_json::from_str(&created).unwrap();
+            let id = created.records[0].id;
+            assert!(f.store.due_scheduled(&host, 200).await.unwrap().is_empty());
+            let unchanged = f
+                .store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &request(json!({"action":"read","id":id})),
+                    6,
+                )
+                .await
+                .unwrap();
+            let unchanged: CollectionResult = serde_json::from_str(&unchanged).unwrap();
+            assert_eq!(unchanged.records[0].value["monitor"]["remaining"], 1);
+            assert_eq!(unchanged.records[0].value["next_run"], 15);
+            f.store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &request(
+                        json!({"action":"delete","id":id,"revision":created.records[0].revision}),
+                    ),
+                    7,
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"read","id":id})),
+                        7
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
+fn task_collection_enforces_scope_plugin_ownership_and_inflight_handoff() {
+    use openwebide_core::{
+        plugins::records::CollectionResult,
+        scheduled::{Schedule, SessionTarget, TaskCommand, TaskDraft},
+    };
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            f.bind_host(mode).await;
+            let request = |grant: &str, operation| PluginHostRequest {
+                grant: grant.repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":"tasks","operation":operation}).to_string(),
+            };
+            let draft = TaskDraft {
+                session_target: SessionTarget::Existing,
+                auto_title: false,
+                title: "Task".into(),
+                prompt: "Check".into(),
+                session_id: f.session,
+                model: None,
+                schedule: Schedule::Once { at: 100 },
+                enabled: true,
+            };
+            let value = json!({"draft":draft,"next_run":100,"state":{},"monitor":null});
+            let created = f
+                .store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &request("a", json!({"action":"create","value":value})),
+                    2,
+                )
+                .await
+                .unwrap();
+            let created: CollectionResult = serde_json::from_str(&created).unwrap();
+            let record = &created.records[0];
+            let other_session = f
+                .store
+                .create_session("Other", None, None, None, f.other, 0)
+                .await
+                .unwrap()
+                .id;
+            let mut invalid = value.clone();
+            invalid["draft"]["session_id"] = json!(other_session);
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("a", json!({"action":"create","value":invalid})),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            let mut other = f.plugin.clone();
+            other.source.path = "plugins/other".into();
+            other.manifest.name = "other".into();
+            f.store
+                .record_plugin(
+                    f.user,
+                    &RecordPlugin {
+                        prepared: other.clone(),
+                        revision: None,
+                        approved_capabilities: vec![],
+                        update_policy: None,
+                        package: Some(Box::new(PluginPackage {
+                            prepared: other.clone(),
+                            skills: vec![],
+                        })),
+                    },
+                    0,
+                )
+                .await
+                .unwrap();
+            f.store
+                .issue_plugin_context_grant(
+                    f.user,
+                    &PluginExecutionContext {
+                        project_id: Some(f.project),
+                        session_id: Some(f.session),
+                        ..Default::default()
+                    },
+                    &other,
+                    &"b".repeat(32),
+                    1,
+                )
+                .await
+                .unwrap();
+            for operation in [
+                json!({"action":"update","id":record.id,"revision":record.revision,"value":value}),
+                json!({"action":"delete","id":record.id,"revision":record.revision}),
+            ] {
+                assert!(
+                    f.store
+                        .plugin_host_request(f.user, f.session, &request("b", operation), 3)
+                        .await
+                        .is_err()
+                );
+            }
+            let legacy = f
+                .store
+                .scheduled_session_command(f.user, f.session, &TaskCommand::Create { draft }, 1)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|task| task.id != record.id)
+                .unwrap();
+            f.store
+                .db
+                .execute(
+                    "INSERT INTO scheduled_runs(task_id,due_at,status) VALUES(?,50,'running')",
+                    &[DbValue::Int(legacy.id)],
+                )
+                .await
+                .unwrap();
+            assert!(f.store.plugin_host_request(f.user,f.session,&request("a",json!({"action":"update","id":legacy.id,"revision":legacy.revision,"value":value})),3).await.is_err());
+            f.store
+                .db
+                .execute(
+                    "UPDATE scheduled_runs SET status='complete' WHERE task_id=?",
+                    &[DbValue::Int(legacy.id)],
+                )
+                .await
+                .unwrap();
+            f.store.plugin_host_request(f.user,f.session,&request("a",json!({"action":"update","id":legacy.id,"revision":legacy.revision,"value":value})),4).await.unwrap();
+            f.store
+                .db
+                .execute(
+                    "INSERT INTO goal_workers(session_id,task_id,revision) VALUES(?,?,1)",
+                    &[DbValue::Int(f.session), DbValue::Int(record.id)],
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("a", json!({"action":"read","id":record.id})),
+                        4
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
+fn run_prerequisites_reject_stale_deleted_or_ungranted_records_without_side_effects() {
+    use openwebide_core::plugins::records::{CollectionResult, RecordOperation, RecordRequest};
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let collection = |operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: encode(&RecordRequest {
+                    collection: "tasks".into(),
+                    operation,
+                })
+                .unwrap(),
+            };
+            let value = json!({"draft":{"session_target":"existing","session_id":f.session,
+                "title":"Saved task","prompt":"Check","schedule":{"kind":"once","at":100},
+                "enabled":true},"next_run":100,"state":{}});
+            let record: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &collection(RecordOperation::Create {
+                            value: value.clone(),
+                        }),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let record = &record.records[0];
+            let command = |key: &str, revision: i64| RunRequest::Submit {
+                key: key.into(),
+                prompt: "Check".into(),
+                target: RunTarget::New {
+                    title: "New work".into(),
+                },
+                model: None,
+                completion: None,
+                prerequisites: vec![RunPrerequisite {
+                    capability: "collections".into(),
+                    collection: "tasks".into(),
+                    id: record.id,
+                    revision,
+                }],
+            };
+            let before = f
+                .store
+                .db
+                .execute("SELECT count(*) FROM sessions", &[])
+                .await
+                .unwrap()
+                .rows[0]
+                .get_int(0)
+                .unwrap();
+            assert!(
+                f.request(&command("stale", record.revision + 1))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                f.request(&RunRequest::List { after: 0 })
+                    .await
+                    .unwrap()
+                    .runs
+                    .is_empty()
+            );
+            let current = command("current", record.revision);
+            let run = f.request(&current).await.unwrap().runs.remove(0);
+            let mut disabled = value.clone();
+            disabled["draft"]["enabled"] = json!(false);
+            disabled["next_run"] = json!(null);
+            let changed: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &collection(RecordOperation::Update {
+                            id: record.id,
+                            revision: record.revision,
+                            value: disabled,
+                        }),
+                        3,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            // Durable retry acknowledges prior work; a late new timer cannot create work.
+            assert_eq!(f.request(&current).await.unwrap().runs[0].id, run.id);
+            assert!(f.request(&command("late", record.revision)).await.is_err());
+            let after = f
+                .store
+                .db
+                .execute("SELECT count(*) FROM sessions", &[])
+                .await
+                .unwrap()
+                .rows[0]
+                .get_int(0)
+                .unwrap();
+            assert_eq!(after, before + 1);
+            f.store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &collection(RecordOperation::Delete {
+                        id: record.id,
+                        revision: changed.records[0].revision,
+                    }),
+                    4,
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.request(&command("deleted", changed.records[0].revision))
+                    .await
+                    .is_err()
+            );
+            let mut ungranted = Fixture::submission("ungranted");
+            if let RunRequest::Submit { prerequisites, .. } = &mut ungranted {
+                prerequisites.push(RunPrerequisite {
+                    capability: "records".into(),
+                    collection: "notes".into(),
+                    id: 1,
+                    revision: 1,
+                });
+            }
+            assert!(matches!(
+                f.request(&ungranted).await,
+                Err(StorageError::InvalidRequest(_))
+            ));
+            assert_eq!(
+                f.request(&RunRequest::List { after: 0 })
+                    .await
+                    .unwrap()
+                    .runs
+                    .len(),
+                1
+            );
+            assert_eq!(
+                f.store
+                    .db
+                    .execute("SELECT count(*) FROM queued_prompts", &[])
+                    .await
+                    .unwrap()
+                    .rows[0]
+                    .get_int(0)
+                    .unwrap(),
+                1
+            );
+        }
+    });
+}
+
+#[test]
+fn task_collection_pages_are_bounded_and_schema_upgrade_preserves_legacy_data() {
+    use openwebide_core::{plugins::records::*, scheduled::*};
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            f.bind_host(mode).await;
+            let draft = TaskDraft {
+                session_target: SessionTarget::Existing,
+                session_id: f.session,
+                title: "Original".into(),
+                prompt: "Keep me".into(),
+                auto_title: false,
+                model: None,
+                schedule: Schedule::Once { at: 100 },
+                enabled: true,
+            };
+            let original = f
+                .store
+                .scheduled_session_command(
+                    f.user,
+                    f.session,
+                    &TaskCommand::Create {
+                        draft: draft.clone(),
+                    },
+                    1,
+                )
+                .await
+                .unwrap()
+                .remove(0);
+            f.store.db.execute("INSERT INTO scheduled_runs(task_id,due_at,status,detail) VALUES(?,10,'complete','Retained history')",&[DbValue::Int(original.id)]).await.unwrap();
+            for column in ["plugin_owner", "plugin_state", "plugin_updated_at"] {
+                f.store
+                    .db
+                    .execute(
+                        &format!("ALTER TABLE scheduled_tasks DROP COLUMN {column}"),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            }
+            f.store
+                .db
+                .execute("PRAGMA user_version=53", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            let read = |operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: encode(&RecordRequest {
+                    collection: "tasks".into(),
+                    operation,
+                })
+                .unwrap(),
+            };
+            let value: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &read(RecordOperation::Read { id: original.id }),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(value.records[0].value["owner"], json!(null));
+            assert_eq!(value.records[0].value["state"], json!({}));
+            assert_eq!(value.records[0].revision, original.revision);
+            let visible = f
+                .store
+                .scheduled_tasks(f.user, Some(f.project), 2)
+                .await
+                .unwrap();
+            assert_eq!(
+                visible[0].last_run.as_ref().unwrap().detail,
+                "Retained history"
+            );
+            // Replay must leave existing revisions, owner and history unchanged.
+            f.store
+                .db
+                .execute("PRAGMA user_version=53", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            let mut large = draft;
+            large.prompt = "x".repeat(32 * 1024);
+            for _ in 0..33 {
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &read(RecordOperation::Create {
+                            value: json!({"draft":large,"next_run":100,"state":{}}),
+                        }),
+                        2,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut after = 0;
+            let mut ids = Vec::new();
+            loop {
+                let serialized = f
+                    .store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &read(RecordOperation::List { after }),
+                        2,
+                    )
+                    .await
+                    .unwrap();
+                assert!(serialized.len() <= 1024 * 1024);
+                let page: CollectionResult = serde_json::from_str(&serialized).unwrap();
+                assert!(page.records.len() <= 32);
+                ids.extend(page.records.iter().map(|record| record.id));
+                let Some(next) = page.next else { break };
+                assert!(next > after);
+                after = next;
+            }
+            assert_eq!(ids.len(), 34);
+            assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
         }
     });
 }

@@ -400,7 +400,11 @@ capability.
 - Complete the Scheduling migration using raw SDK run submissions and durable
   completion events; host dispatch, scoped conversation discovery, project events,
   model pins and atomic terminal callbacks share the same queue, version pinning,
-  renewable leases and scoped callback authority. Route remaining UI and
+  renewable leases and scoped callback authority. Task collection CRUD preserves
+  existing IDs/history and excludes plugin-owned records from legacy dispatch;
+  record prerequisites atomically reject stale new prompt submissions. Finish
+  source-owned task/monitor handlers, history integration, recovery and cancellation,
+  then activate the executable release. Route remaining UI and
   background invocations through the sessionless execution-context API; Memory
   mutations already use shared guarded actions.
 - Extend authenticated, run-pinned private record callbacks with shared collection

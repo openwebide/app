@@ -102,8 +102,20 @@ pub fn jobs<T: Serialize, R: serde::de::DeserializeOwned>(operation: &T) -> Resu
 /// Durable prompt submissions. Operations are list/read/submit/cancel/delete.
 /// The host validates conversation scope and queues prompts; plugins decide when
 /// to submit them and how to interpret status or completion results.
+/// Submit may include up to eight `prerequisites`: scoped record revisions checked
+/// atomically before creating a new run. Identical-key retries return existing work.
 pub fn runs<T: Serialize, R: serde::de::DeserializeOwned>(operation: &T) -> Result<R, String> {
     request("runs", operation)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPrerequisite {
+    /// Requires the corresponding declared and approved `records` or `collections` grant.
+    pub capability: String,
+    pub collection: String,
+    pub id: i64,
+    pub revision: i64,
 }
 
 /// The host independently validates names, schemas and requested capabilities.

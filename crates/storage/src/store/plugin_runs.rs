@@ -49,6 +49,7 @@ impl<D: Db> Store<D> {
                 target,
                 model,
                 completion,
+                prerequisites,
             } => {
                 if !self.plugin_namespace_enabled(user, context, plugin).await? {
                     return Err(StorageError::Conflict("Plugin is no longer enabled".into()));
@@ -79,6 +80,57 @@ impl<D: Db> Store<D> {
                         runs: vec![run(row)?],
                         next_after: None,
                     });
+                }
+                // The enclosing grant transaction also queues the prompt: no edit or
+                // deletion can race between these scoped reads and the new submission.
+                // An identical retry above returns prior work even if its source record
+                // has since advanced, preserving the existing idempotency contract.
+                for condition in prerequisites {
+                    if !plugin
+                        .manifest
+                        .executable
+                        .as_ref()
+                        .is_some_and(|rust| rust.capabilities.contains(&condition.capability))
+                    {
+                        return Err(StorageError::InvalidRequest(
+                            "Run prerequisite capability is not granted".into(),
+                        ));
+                    }
+                    let read = openwebide_core::plugins::records::RecordRequest {
+                        collection: condition.collection.clone(),
+                        operation: openwebide_core::plugins::records::RecordOperation::Read {
+                            id: condition.id,
+                        },
+                    };
+                    let records = if condition.capability == "collections" {
+                        let result = self
+                            .plugin_collections_in_transaction(user, plugin, context, &read, now)
+                            .await?;
+                        if !result.enabled {
+                            return Err(StorageError::Conflict(
+                                "Run prerequisite collection is disabled".into(),
+                            ));
+                        }
+                        result.records
+                    } else {
+                        self.plugin_project_records_in_transaction(
+                            user,
+                            context.project_id,
+                            &plugin.storage_namespace(),
+                            &read,
+                            now,
+                        )
+                        .await?
+                        .records
+                    };
+                    if !records
+                        .first()
+                        .is_some_and(|record| record.revision == condition.revision)
+                    {
+                        return Err(StorageError::Conflict(
+                            "Run prerequisite record changed".into(),
+                        ));
+                    }
                 }
                 let count = self.db.execute("SELECT count(*) FROM plugin_runs WHERE user_id=? AND project_scope=? AND plugin=?", &scope).await?.rows[0].get_int(0)?;
                 if count >= MAX_RUNS {

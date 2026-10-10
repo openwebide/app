@@ -169,15 +169,15 @@ with sessionless grants and no built-in behavior fallback. The explicit UI actio
 grant permits manual editing while automatic Memory context is switched off;
 plugin code cannot opt itself into this authority. Plugins on a paired host do
 not require that host to see a local project's browser folder. Workspace commands
-and Git retain their separate folder mapping requirement. Background run
-submission and executable-default deployment remain unfinished.
+and Git retain their separate folder mapping requirement. Background runs use
+shared leased delivery; executable-default deployment remains unfinished.
 The separate `completion` grant exposes bounded text generation through the
 session's configured primary or fast model. Plugins supply prompts and interpret
 the results; the host supplies model selection and credentials. Inputs are limited
 to 32 KiB, outputs to 1–1024 tokens and 16 KiB of text, with a 30-second completion
 deadline and no tools. Context hooks cannot request completions. The source
 Memory plugin owns its naming prompt, profile fallback and content-derived title.
-Further shared collection adapters, run and workspace callbacks, installation progress
+Task-history integration, workspace callbacks, installation progress
 and cancellation, and compiled offline defaults still need implementation. API 2
 first-party plugins remain transitional.
 
@@ -243,6 +243,28 @@ source version, model and context across updates. Existing event lease/disableme
 rules and at-least-once delivery apply. Callback cancellation suppresses delivery;
 plugins own idempotency and outcome interpretation. Executable Scheduling remains
 unfinished.
+
+The `tasks` collection exposes the existing saved-task and monitor records through
+scoped CRUD. Values contain `draft`, `next_run`, `state` (a plugin-owned JSON object)
+and optional `monitor` metadata (`session_id`, `interval_seconds`, `remaining`,
+`expires_at`). Reads also include the owning namespace and an `editable` flag;
+these fields are read-only. The host validates data integrity and conversation/model
+ownership, not cron, recurrence, future-time or monitor-outcome policy. Updates and
+deletes require the current record revision. An unowned legacy task can be adopted
+when no prior delivery is active; another plugin's task cannot be mutated. Adoption
+preserves its ID/history and stops legacy dispatch. Goal-worker records are excluded.
+Lists use ascending ID cursors, at most 32 records and a 1 MiB serialized envelope.
+Scheduling's executable handlers and task-history integration remain unfinished.
+
+Raw run `submit` accepts optional `prerequisites`, with at most eight objects of
+`{capability, collection, id, revision}`. Capability is `records` or `collections`
+and requires that separate grant. The host reads these records within the same
+transaction that creates the prompt, rejecting missing, changed or disabled
+records without creating a run, conversation or completion event. No caller-supplied
+account, project or namespace is accepted. Identical-key retries return prior work
+even if its prerequisite has since changed; a prerequisite protects new submissions,
+not cancellation of already queued or running work. Plugins must explicitly cancel
+that work when changing their policy.
 
 The read-only `conversations` collection supports `list` (ascending ID cursor,
 32 records and at most 1 MiB) and scoped `read`. Values expose names, creation and

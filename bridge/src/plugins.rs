@@ -1338,6 +1338,45 @@ mod rust_plugin_tests {
         assert_eq!(metadata.records.len(), 1);
         assert_eq!(metadata.records[0].id, session);
         assert_eq!(metadata.records[0].value["origin"], true);
+        let task = executor.execute(&openwebide_core::ToolCall {
+            id:"task-record".into(),name:"fixture_echo".into(),
+            arguments:serde_json::json!({"collections":{"collection":"tasks","operation":{"action":"create","value":{
+                "draft":{"title":"Plugin-owned task","prompt":"Source chooses the prompt","session_id":session,"session_target":"existing","schedule":{"kind":"once","at":100},"enabled":true},
+                "next_run":111,"state":{"proof":"SDK task state"},"monitor":null
+            }}}}).to_string(),
+        }).await;
+        assert!(task.ok, "{}", task.content);
+        let task: openwebide_core::plugins::records::CollectionResult =
+            serde_json::from_str(&task.content).unwrap();
+        assert_eq!(task.records[0].value["owner"], prepared.storage_namespace());
+        let visible = store.scheduled_tasks(user, Some(project), 3).await.unwrap();
+        assert_eq!(visible[0].id, task.records[0].id);
+        assert_eq!(visible[0].next_run, Some(111));
+        let stale_submission = serde_json::json!({"runs":{"action":"submit","key":"guarded-task","prompt":"Only queue current tasks","target":{"kind":"origin"},"prerequisites":[{"capability":"collections","collection":"tasks","id":task.records[0].id,"revision":task.records[0].revision + 1}]}});
+        let stale = executor
+            .execute(&openwebide_core::ToolCall {
+                id: "task-stale".into(),
+                name: "fixture_echo".into(),
+                arguments: stale_submission.to_string(),
+            })
+            .await;
+        assert!(!stale.ok);
+        let removed=executor.execute(&openwebide_core::ToolCall {
+            id:"task-delete".into(),name:"fixture_echo".into(),
+            arguments:serde_json::json!({"collections":{"collection":"tasks","operation":{"action":"delete","id":task.records[0].id,"revision":task.records[0].revision}}}).to_string(),
+        }).await;
+        assert!(removed.ok, "{}", removed.content);
+        let mut deleted_submission = stale_submission;
+        deleted_submission["runs"]["prerequisites"][0]["revision"] =
+            serde_json::json!(task.records[0].revision);
+        let deleted = executor
+            .execute(&openwebide_core::ToolCall {
+                id: "task-deleted".into(),
+                name: "fixture_echo".into(),
+                arguments: deleted_submission.to_string(),
+            })
+            .await;
+        assert!(!deleted.ok);
         // Public SDK code schedules a real durable event; delivery uses the same executor.
         let scheduled = executor.execute(&openwebide_core::ToolCall {
             id:"schedule".into(), name:"fixture_echo".into(),

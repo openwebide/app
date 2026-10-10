@@ -16,6 +16,7 @@ mod plugin_jobs;
 mod plugin_records;
 mod plugin_runs;
 mod plugin_skill_collection;
+mod plugin_task_collection;
 mod plugins;
 mod push;
 mod questions;

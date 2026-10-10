@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 pub const MAX_RUNS: i64 = 1000;
 pub const RUN_PAGE_SIZE: i64 = 16;
 
+/// A scoped record revision that must still exist when a new prompt is queued.
+/// This prevents stale event handlers from submitting work after an edit/delete.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunPrerequisite {
+    pub capability: String,
+    pub collection: String,
+    pub id: i64,
+    pub revision: i64,
+}
+
 /// A declared event receives `{run: PluginRun, data: payload}` after termination.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +48,8 @@ pub enum RunRequest {
         model: Option<crate::ModelSelection>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         completion: Option<RunCompletion>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prerequisites: Vec<RunPrerequisite>,
     },
     Cancel {
         id: i64,
@@ -63,7 +76,23 @@ impl RunRequest {
                 target,
                 model,
                 completion,
+                prerequisites,
             } => {
+                if prerequisites.len() > 8 {
+                    return Err("Run submissions accept at most eight record prerequisites".into());
+                }
+                for condition in prerequisites {
+                    if !matches!(condition.capability.as_str(), "records" | "collections")
+                        || condition.revision <= 0
+                    {
+                        return Err("Invalid run record prerequisite".into());
+                    }
+                    super::records::RecordRequest {
+                        collection: condition.collection.clone(),
+                        operation: super::records::RecordOperation::Read { id: condition.id },
+                    }
+                    .validate()?;
+                }
                 if key.is_empty()
                     || key.len() > 128
                     || !key.bytes().all(|c| {
@@ -246,5 +275,56 @@ pub enum RunServiceResponse {
 impl RunDelivery {
     pub fn run_id(&self) -> String {
         format!("plugin-run-{}-{}", self.lease.id, self.lease.lease)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prerequisites_are_bounded_scoped_and_omitted_for_legacy_submissions() {
+        let old = json!({"action":"submit","key":"old","prompt":"Work","target":{"kind":"origin"},"model":null});
+        let mut request: RunRequest = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), old);
+        let condition = RunPrerequisite {
+            capability: "collections".into(),
+            collection: "tasks".into(),
+            id: 1,
+            revision: 1,
+        };
+        for invalid in [
+            RunPrerequisite {
+                capability: "http".into(),
+                ..condition.clone()
+            },
+            RunPrerequisite {
+                collection: "../tasks".into(),
+                ..condition.clone()
+            },
+            RunPrerequisite {
+                id: 0,
+                ..condition.clone()
+            },
+            RunPrerequisite {
+                revision: 0,
+                ..condition.clone()
+            },
+        ] {
+            if let RunRequest::Submit { prerequisites, .. } = &mut request {
+                *prerequisites = vec![invalid];
+            }
+            assert!(request.validate().is_err());
+        }
+        if let RunRequest::Submit { prerequisites, .. } = &mut request {
+            *prerequisites = vec![condition.clone(); 8];
+        }
+        request.validate().unwrap();
+        if let RunRequest::Submit { prerequisites, .. } = &mut request {
+            prerequisites.push(condition);
+        }
+        assert!(request.validate().is_err());
+        assert!(serde_json::from_value::<RunPrerequisite>(json!({"capability":"records","collection":"notes","id":1,"revision":1,"user_id":42})).is_err());
     }
 }

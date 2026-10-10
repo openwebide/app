@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 53;
+pub const SCHEMA_VERSION: i64 = 54;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -617,6 +617,27 @@ async fn apply_step<D: Db>(
                     &[],
                 )
                 .await?;
+            }
+            Ok(())
+        }
+        54 => {
+            for (column, sql) in [
+                (
+                    "plugin_owner",
+                    "ALTER TABLE scheduled_tasks ADD COLUMN plugin_owner TEXT",
+                ),
+                (
+                    "plugin_state",
+                    "ALTER TABLE scheduled_tasks ADD COLUMN plugin_state TEXT NOT NULL DEFAULT '{}'",
+                ),
+                (
+                    "plugin_updated_at",
+                    "ALTER TABLE scheduled_tasks ADD COLUMN plugin_updated_at INTEGER NOT NULL DEFAULT 0",
+                ),
+            ] {
+                if db.execute(&format!("SELECT 1 FROM pragma_table_info('scheduled_tasks') WHERE name='{column}'"), &[]).await?.rows.is_empty() {
+                    db.execute(sql,&[]).await?;
+                }
             }
             Ok(())
         }
