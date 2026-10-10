@@ -202,6 +202,11 @@ existing 128 KiB skill data schema even when JSON escaping expands its payload;
 private records retain their 64 KiB value limit.
 Authoring, search and prompt policy stay in plugin source.
 
+Every shared tool, context and event invocation prepares the selected source on
+its execution host before starting WASM. The host receipt must match the pinned
+source, manifest and digest; a different host ID is allowed. Preparation failures
+stop execution. Valid source and artifact caches support offline reuse.
+
 Both host adapters prepare plugin tools through the shared run planner before
 applying connection tool selection and model tool settings. A plugin without an
 advertised tool retains no tool execution grant after context planning. Context

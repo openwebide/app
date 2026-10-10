@@ -20,6 +20,13 @@ struct Transport {
     operation: &'static str,
 }
 impl PluginTransport for Transport {
+    async fn ensure_prepared(
+        &self,
+        expected: &openwebide_core::plugins::PreparedPlugin,
+    ) -> Result<openwebide_core::plugins::PreparedPlugin, String> {
+        Ok(expected.clone())
+    }
+
     async fn start(&self, call: InvokePlugin) -> Result<PluginInvocation, String> {
         self.calls.lock().unwrap().push(call);
         Ok(PluginInvocation {

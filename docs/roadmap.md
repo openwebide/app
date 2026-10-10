@@ -411,7 +411,8 @@ capability.
 - Complete installation and run verification of the plugin-owned Web, Memory and
   Skill Authoring sources. Route existing Memory UI automatic naming through its
   plugin-owned completion workflow through a deployed executable default. Verify
-  cold-cache preparation on paired hosts without requiring workspace mapping.
+  cold-cache preparation through the deployed browser HTTP lifecycle; native
+  server and paired caches already share validated preparation and offline reuse.
   Replace the transitional Scheduling tool-group
   feature switch with a plugin-owned implementation and retire legacy dispatch.
   Require the same public SDK, interfaces and privileges as community plugins:

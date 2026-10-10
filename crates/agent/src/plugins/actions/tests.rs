@@ -54,6 +54,10 @@ impl PluginActionHost for Host {
     }
 }
 impl PluginTransport for Host {
+    async fn ensure_prepared(&self, expected: &PreparedPlugin) -> Result<PreparedPlugin, String> {
+        Ok(expected.clone())
+    }
+
     async fn start(&self, call: InvokePlugin) -> Result<PluginInvocation, String> {
         self.record("start");
         assert_eq!(call.prepared.host_id, self.profile);

@@ -81,6 +81,11 @@ impl PlanningHost<'static> {
     }
 }
 impl openwebide_agent::plugins::execution::PluginTransport for PlanningHost<'_> {
+    async fn ensure_prepared(&self, expected: &PreparedPlugin) -> Result<PreparedPlugin, String> {
+        self.send("/plugins/prepare", json!({"source":expected.source}))
+            .await
+    }
+
     async fn start(
         &self,
         call: openwebide_core::plugins::execution::InvokePlugin,

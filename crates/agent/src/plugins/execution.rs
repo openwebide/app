@@ -8,6 +8,12 @@ use openwebide_core::{ToolCall, ToolDefinition};
 use std::{future::Future, sync::Arc};
 
 pub trait PluginTransport: Clone + Send + Sync {
+    /// Prepare the selected immutable source in this host's cache.
+    fn ensure_prepared(
+        &self,
+        expected: &PreparedPlugin,
+    ) -> impl Future<Output = Result<PreparedPlugin, String>> + Send;
+
     fn start(
         &self,
         call: InvokePlugin,
@@ -138,6 +144,21 @@ impl<E, T: PluginTransport, S: PluginServices> PluginTools<E, T, S> {
     }
 }
 
+/// A different host may produce its own host ID, but cannot change the selected program.
+pub fn validate_prepared_selection(
+    expected: &PreparedPlugin,
+    prepared: &PreparedPlugin,
+) -> Result<(), String> {
+    prepared.validate().map_err(|error| error.to_string())?;
+    if prepared.source != expected.source
+        || prepared.manifest != expected.manifest
+        || prepared.digest != expected.digest
+    {
+        return Err("Plugin version changed during preparation".into());
+    }
+    Ok(())
+}
+
 /// One bounded invocation workflow for tools and planning hooks on every host.
 pub async fn invoke_plugin<T: PluginTransport, S: PluginServices>(
     transport: &T,
@@ -152,9 +173,15 @@ pub async fn invoke_plugin<T: PluginTransport, S: PluginServices>(
 async fn invoke_inner<T: PluginTransport, S: PluginServices>(
     transport: &T,
     services: &S,
-    call: InvokePlugin,
+    mut call: InvokePlugin,
 ) -> Result<ToolOutcome, String> {
     call.validate_event()?;
+    call.prepared
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let prepared = transport.ensure_prepared(&call.prepared).await?;
+    validate_prepared_selection(&call.prepared, &prepared)?;
+    call.prepared = prepared;
     let context = matches!(
         call.operation,
         openwebide_core::plugins::execution::PluginOperation::Context
@@ -377,6 +404,13 @@ mod tests {
         }
     }
     impl PluginTransport for Transport {
+        async fn ensure_prepared(
+            &self,
+            expected: &PreparedPlugin,
+        ) -> Result<PreparedPlugin, String> {
+            Ok(expected.clone())
+        }
+
         async fn start(&self, _: InvokePlugin) -> Result<PluginInvocation, String> {
             self.next()
         }
@@ -387,6 +421,110 @@ mod tests {
         fn cancel(&self, id: String) {
             self.cancellations.lock().unwrap().push(id);
         }
+    }
+    #[derive(Clone)]
+    struct PreparingTransport {
+        inner: Transport,
+        prepared: Result<PreparedPlugin, String>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+    impl PluginTransport for PreparingTransport {
+        async fn ensure_prepared(&self, _: &PreparedPlugin) -> Result<PreparedPlugin, String> {
+            self.calls.lock().unwrap().push("prepare");
+            self.prepared.clone()
+        }
+        async fn start(&self, call: InvokePlugin) -> Result<PluginInvocation, String> {
+            self.calls.lock().unwrap().push("start");
+            assert_eq!(call.prepared.host_id, "cold-host");
+            self.inner.start(call).await
+        }
+        async fn resume(&self, response: ContinuePlugin) -> Result<PluginInvocation, String> {
+            self.calls.lock().unwrap().push("resume");
+            self.inner.resume(response).await
+        }
+        fn cancel(&self, id: String) {
+            self.inner.cancel(id);
+        }
+    }
+    #[test]
+    fn cold_host_preparation_is_required_for_tools_context_and_events_in_both_modes() {
+        use openwebide_core::{WorkspaceMode, plugins::execution::PluginOperation};
+        block_on(async {
+            for _mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+                for operation in [
+                    PluginOperation::Tool,
+                    PluginOperation::Context,
+                    PluginOperation::Event,
+                ] {
+                    let selected = plugin();
+                    let mut prepared = selected.clone();
+                    prepared.host_id = "cold-host".into();
+                    let mut altered_source = prepared.clone();
+                    altered_source.source.commit = "b".repeat(40);
+                    let mut altered_digest = prepared.clone();
+                    altered_digest.digest = "b".repeat(64);
+                    let mut altered_manifest = prepared.clone();
+                    altered_manifest.manifest.display_name = "Different behavior".into();
+                    for (receipt, succeeds) in [
+                        (Ok(prepared.clone()), true),
+                        (Err("Compiler unavailable".into()), false),
+                        (Ok(altered_source), false),
+                        (Ok(altered_digest), false),
+                        (Ok(altered_manifest), false),
+                    ] {
+                        let inner = Transport::default();
+                        inner.steps.lock().unwrap().extend([
+                            PluginInvocation {
+                                id: "cold".into(),
+                                step: PluginStep::Ready,
+                            },
+                            PluginInvocation {
+                                id: "cold".into(),
+                                step: PluginStep::Complete {
+                                    ok: true,
+                                    content: "{}".into(),
+                                    summary: "Done".into(),
+                                },
+                            },
+                        ]);
+                        let transport = PreparingTransport {
+                            inner,
+                            prepared: receipt,
+                            calls: Arc::default(),
+                        };
+                        let services = Services::default();
+                        let result = invoke_plugin(
+                            &transport,
+                            &services,
+                            InvokePlugin {
+                                prepared: selected.clone(),
+                                operation,
+                                name: if matches!(operation, PluginOperation::Tool) {
+                                    "fixture_echo".into()
+                                } else {
+                                    String::new()
+                                },
+                                arguments: if matches!(operation, PluginOperation::Event) {
+                                    serde_json::json!({"name":"job_due","payload":null}).to_string()
+                                } else {
+                                    "{}".into()
+                                },
+                            },
+                        )
+                        .await;
+                        assert_eq!(result.is_ok(), succeeds, "{result:?}");
+                        let calls = transport.calls.lock().unwrap();
+                        if succeeds {
+                            assert_eq!(*calls, ["prepare", "start", "resume"]);
+                        } else {
+                            assert_eq!(*calls, ["prepare"]);
+                            assert_eq!(transport.inner.steps.lock().unwrap().len(), 2);
+                        }
+                        assert_eq!(*services.calls.lock().unwrap(), 0);
+                    }
+                }
+            }
+        });
     }
     #[derive(Default)]
     struct Services {

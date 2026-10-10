@@ -25,6 +25,16 @@ pub struct NativePluginTransport {
     pub owner: String,
 }
 impl PluginTransport for NativePluginTransport {
+    async fn ensure_prepared(
+        &self,
+        expected: &openwebide_core::plugins::PreparedPlugin,
+    ) -> Result<openwebide_core::plugins::PreparedPlugin, String> {
+        self.installer
+            .prepare(&self.owner, expected.host_id.clone(), &expected.source)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn start(&self, call: InvokePlugin) -> Result<PluginInvocation, String> {
         self.invocations
             .start(&self.installer, &self.owner, call)

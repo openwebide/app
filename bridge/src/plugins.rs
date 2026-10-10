@@ -720,7 +720,7 @@ mod tests {
         testing::{review_files, source},
     };
 
-    fn command(cwd: &Path, args: &[&str]) -> String {
+    pub(super) fn command(cwd: &Path, args: &[&str]) -> String {
         let result = std::process::Command::new("git")
             .args(args)
             .current_dir(cwd)
@@ -1036,7 +1036,7 @@ mod bundled_tests {
 
 #[cfg(test)]
 mod rust_plugin_tests {
-    use super::*;
+    use super::{tests::command, *};
     use openwebide_core::plugins::execution;
     struct DatabaseHost {
         store: openwebide_storage::Store<openwebide_storage::rusqlite_db::RusqliteDb>,
@@ -1196,7 +1196,62 @@ mod rust_plugin_tests {
         })
         .collect::<Vec<_>>();
         openwebide_core::plugins::validate_files(&files).unwrap();
-        let source = openwebide_core::plugins::testing::source();
+        let repository = tempfile::tempdir().unwrap();
+        for file in &files {
+            let path = repository.path().join(&file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &file.content).unwrap();
+        }
+        command(repository.path(), &["init", "-q"]);
+        command(repository.path(), &["add", "."]);
+        command(
+            repository.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "-qm",
+                "Rust source fixture",
+            ],
+        );
+        let commit = command(repository.path(), &["rev-parse", "HEAD"]);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut daemon = Command::new("git")
+            .args([
+                "daemon",
+                "--export-all",
+                "--reuseaddr",
+                "--listen=127.0.0.1",
+                &format!("--port={port}"),
+                &format!("--base-path={}", repository.path().display()),
+                repository.path().to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut ready = false;
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ready, "public Git source fixture did not start");
+        let source = PluginSource {
+            repository: format!("git://127.0.0.1:{port}/"),
+            commit,
+            path: ".".into(),
+        };
         let digest = openwebide_core::plugins::package_digest(&files);
         let installer = NativePluginInstaller::new(Some(root.path().to_path_buf()));
         for host_id in ["server-host", "paired-local-host"] {
@@ -1209,10 +1264,7 @@ mod rust_plugin_tests {
                 root: root.path().join(key(owner)),
                 host_id: host_id.into(),
             };
-            host.publish(&source, &digest, &files).await.unwrap();
-            host.compile(&source, &digest, &manifest).await.unwrap();
-            let bytes = load_artifact(&host.artifact(&source, &digest)).unwrap();
-            assert!(!bytes.is_empty());
+            assert!(!host.artifact(&source, &digest).exists());
             let prepared = PreparedPlugin {
                 source: source.clone(),
                 manifest: manifest.clone(),
@@ -1220,6 +1272,17 @@ mod rust_plugin_tests {
                 host_id: host_id.into(),
             };
             exercise_records(&installer, owner, &prepared).await;
+            // The shared run workflow fetched source and compiled this previously cold host.
+            let bytes = load_artifact(&host.artifact(&source, &digest)).unwrap();
+            assert!(!bytes.is_empty());
+            assert_eq!(
+                installer
+                    .prepare(owner, host_id.into(), &source)
+                    .await
+                    .unwrap(),
+                prepared
+            );
+
             let invocations = invocations::Invocations::default();
             let event = invocations
                 .start(
@@ -1455,6 +1518,15 @@ mod rust_plugin_tests {
                     .await
                     .is_err()
             );
+        }
+        daemon.kill().await.unwrap();
+        // Repeat preparation/execution with the source endpoint offline.
+        for (owner, host_id) in [("user:1", "server-host"), ("paired", "paired-local-host")] {
+            let prepared = installer
+                .prepare(owner, host_id.into(), &source)
+                .await
+                .unwrap();
+            exercise_records(&installer, owner, &prepared).await;
         }
         let host = ScopedHost {
             root: root.path().join(key("user:1")),

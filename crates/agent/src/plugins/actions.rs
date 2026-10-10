@@ -33,13 +33,7 @@ pub async fn invoke_plugin_action<H: PluginActionHost>(
     let selected = select_plugin_action(bindings, call, approved)?;
     let prepared = host.prepare(selected).await?;
     current(host)?;
-    prepared.validate().map_err(|error| error.to_string())?;
-    if prepared.source != selected.source
-        || prepared.manifest != selected.manifest
-        || prepared.digest != selected.digest
-    {
-        return Err("Plugin version changed during preparation".into());
-    }
+    super::execution::validate_prepared_selection(selected, &prepared)?;
     let grant = host.grant(&prepared).await?;
     current(host)?;
     if grant.is_empty() {
@@ -110,6 +104,12 @@ struct GuardedHost<H>(H);
 #[cfg(test)]
 mod tests;
 impl<H: PluginActionHost> PluginTransport for GuardedHost<H> {
+    async fn ensure_prepared(&self, expected: &PreparedPlugin) -> Result<PreparedPlugin, String> {
+        current(&self.0)?;
+        // Action policy already prepared and validated before issuing authority.
+        Ok(expected.clone())
+    }
+
     async fn start(&self, call: InvokePlugin) -> Result<PluginInvocation, String> {
         current(&self.0)?;
         self.0.start(call).await

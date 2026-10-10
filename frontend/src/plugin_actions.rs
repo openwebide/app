@@ -123,6 +123,10 @@ impl PluginActionHost for ActionHost {
     }
 }
 impl PluginTransport for ActionHost {
+    async fn ensure_prepared(&self, expected: &PreparedPlugin) -> Result<PreparedPlugin, String> {
+        <Self as PluginActionHost>::prepare(self, expected).await
+    }
+
     async fn start(&self, call: InvokePlugin) -> Result<PluginInvocation, String> {
         SendWrapper::new(async move {
             match &*self.transport {

@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Prepare pinned Rust plugins on the selected execution host before agent tools, context hooks and event callbacks. Validate source, manifest and digest before execution, supporting cold caches and offline reuse through the same shared workflow.
+
 - Route Memory UI mutations through declared executable-plugin actions, sharing grants, validation, cancellation and stale-result guards with agent execution. Preserve explicit manual editing while automatic Memory context is disabled. Executable defaults and deployment remain in progress.
 
 - Select paired plugin hosts independently of local workspace folder mapping, allowing plugin installation and execution when only the browser can access the project folder. Command and Git operations retain their existing mapping checks.

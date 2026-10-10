@@ -1304,6 +1304,20 @@ type BrowserBaseTaskExecutor = openwebide_agent::plugins::execution::PluginTools
 #[derive(Clone)]
 struct BrowserPluginTransport(Option<crate::plugin_bridge::PluginBridgeClient>);
 impl openwebide_agent::plugins::execution::PluginTransport for BrowserPluginTransport {
+    async fn ensure_prepared(
+        &self,
+        expected: &openwebide_core::plugins::PreparedPlugin,
+    ) -> Result<openwebide_core::plugins::PreparedPlugin, String> {
+        SendWrapper::new(async move {
+            self.0
+                .as_ref()
+                .ok_or("Connect this project's execution host first.")?
+                .prepare_plugin(&expected.source)
+                .await
+        })
+        .await
+    }
+
     async fn start(
         &self,
         call: openwebide_core::plugins::execution::InvokePlugin,
