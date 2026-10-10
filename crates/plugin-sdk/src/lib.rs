@@ -6,6 +6,33 @@ pub mod bindings {
 use serde::{Deserialize, Serialize};
 pub use serde_json;
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionProfile {
+    #[default]
+    Primary,
+    Fast,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionRequest {
+    pub system_prompt: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub profile: CompletionProfile,
+    pub max_output_tokens: usize,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionResponse {
+    pub text: String,
+}
+/// Bounded text generation through the host's configured primary or fast model.
+/// Plugins own prompts, interpretation and fallback behavior. Tools are disabled.
+pub fn complete(input: &CompletionRequest) -> Result<CompletionResponse, String> {
+    request("completion", input)
+}
+
 /// General HTTP transport. Bodies use base64 so binary data stays portable.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

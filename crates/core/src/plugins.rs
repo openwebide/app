@@ -1,4 +1,5 @@
 //! Host-only plugin preparation policy, shared by every bridge transport.
+pub mod completion;
 pub mod execution;
 pub mod marketplace;
 pub mod records;
@@ -222,7 +223,7 @@ impl PluginManifest {
                     .library
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                || rust.capabilities.len() > 6
+                || rust.capabilities.len() > 7
                 || rust.capabilities.iter().any(|name| {
                     ![
                         "http",
@@ -231,6 +232,7 @@ impl PluginManifest {
                         "jobs",
                         "workspace",
                         "clock",
+                        "completion",
                     ]
                     .contains(&name.as_str())
                 })

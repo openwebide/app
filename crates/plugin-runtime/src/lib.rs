@@ -18,6 +18,7 @@ pub const CAPABILITIES: &[&str] = &[
     "jobs",
     "workspace",
     "clock",
+    "completion",
 ];
 
 /// Adapters implement general primitives, never feature-specific dispatch.
@@ -331,6 +332,51 @@ mod tests {
                     .is_err()
             );
         }
+        assert!(
+            runtime
+                .context(
+                    &bytes,
+                    Records,
+                    &["records".into(), "completion".into()],
+                    sdk::ContextInput { budget_bytes: 4 }
+                )
+                .is_err()
+        );
+    }
+    #[test]
+    fn public_sdk_completion_uses_only_the_declared_general_capability() {
+        struct Model;
+        impl HostServices for Model {
+            fn request(&mut self, capability: &str, payload: &str) -> Result<String, String> {
+                assert_eq!(capability, "completion");
+                let request: openwebide_core::plugins::completion::CompletionRequest =
+                    serde_json::from_str(payload).unwrap();
+                request.validate().unwrap();
+                assert_eq!(request.prompt, "Fact");
+                Ok(serde_json::json!({"text":"Fact title"}).to_string())
+            }
+        }
+        let runtime = Runtime::new().unwrap();
+        let bytes = fixture();
+        let input=serde_json::json!({"system_prompt":"Plugin policy","prompt":"Fact","profile":"fast","max_output_tokens":128}).to_string();
+        assert!(
+            runtime
+                .execute(&bytes, Model, &[], "fixture_completion", &input)
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .execute(
+                    &bytes,
+                    Model,
+                    &["completion".into()],
+                    "fixture_completion",
+                    &input
+                )
+                .unwrap()
+                .content,
+            "Fact title"
+        );
     }
     #[test]
     fn traps_and_exhausted_fuel_do_not_poison_subsequent_calls() {

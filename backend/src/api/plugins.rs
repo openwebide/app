@@ -98,14 +98,43 @@ impl openwebide_agent::plugins::execution::GrantedHost for PlanningHost<'_> {
         &self,
         request: &openwebide_core::plugins::execution::PluginHostRequest,
     ) -> Result<String, String> {
-        self.store()
-            .plugin_host_request(self.user, self.session, request, now())
+        execute_host_request(self.store(), self.user, self.session, request)
             .await
             .map_err(|error| {
-                let error = ApiError::from(error);
                 error.log_for_route("POST", "/api/sessions/plugin-host");
                 error.public_message().to_owned()
             })
+    }
+}
+
+async fn execute_host_request(
+    store: &openwebide_storage::Store<crate::state::AppDb>,
+    user: UserId,
+    session: i64,
+    request: &openwebide_core::plugins::execution::PluginHostRequest,
+) -> Result<String, ApiError> {
+    if request.capability == "completion" {
+        let (_, context) = store
+            .authorize_plugin_host(user, session, request, now())
+            .await?;
+        let input: openwebide_core::plugins::completion::CompletionRequest =
+            serde_json::from_str(&request.payload)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        input.validate().map_err(ApiError::bad_request)?;
+        let connection = context
+            .connection_id
+            .ok_or_else(|| ApiError::bad_request("Session has no model connection"))?;
+        let runtime = super::model_setup::runtime_store(store, user, connection, None).await?;
+        let source = super::model_operations::ModelSource { store, user };
+        let result = openwebide_agent::plugins::completion::complete(&source, runtime, input)
+            .await
+            .map_err(ApiError::bad_request)?;
+        serde_json::to_string(&result).map_err(|error| ApiError::internal(error.to_string()))
+    } else {
+        store
+            .plugin_host_request(user, session, request, now())
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -164,10 +193,7 @@ pub(crate) async fn host_request(
         parse_json(read_body(req, 4 * 1024 * 1024).await?)?;
     Ok(json_response(
         200,
-        &state
-            .store
-            .plugin_host_request(user.id, session, &request, now())
-            .await?,
+        &execute_host_request(&state.store, user.id, session, &request).await?,
     ))
 }
 
@@ -439,3 +465,6 @@ pub(super) async fn ensure_bundled_plugins(state: &AppState, user: UserId) {
         eprintln!("Bundled plugin initialization deferred: {error:?}");
     }
 }
+
+#[cfg(test)]
+mod completion_tests;

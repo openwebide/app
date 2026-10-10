@@ -406,8 +406,8 @@ capability.
   distribution and source-authoring/custom-marketplace workflow, and verify the
   complete install/run/update lifecycle through both host adapters.
 - Complete installation and run verification of the plugin-owned Web, Memory and
-  Skill Authoring sources. Move model-assisted Memory naming into plugin code over
-  a general completion primitive. Replace the transitional Scheduling tool-group
+  Skill Authoring sources. Route existing Memory UI automatic naming through its
+  plugin-owned completion workflow. Replace the transitional Scheduling tool-group
   feature switch with a plugin-owned implementation and retire legacy dispatch.
   Require the same public SDK, interfaces and privileges as community plugins:
   no first-party identity dispatch, built-in feature proxy or fallback. Keep host

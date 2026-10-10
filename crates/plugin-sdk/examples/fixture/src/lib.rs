@@ -2,6 +2,9 @@ use openwebide_plugin_sdk::{Plugin, Tool, Outcome, serde_json::{self, json}};
 struct Fixture;
 impl Plugin for Fixture {
     fn context(input: openwebide_plugin_sdk::ContextInput) -> Result<openwebide_plugin_sdk::ContextContribution, String> {
+        if input.budget_bytes == 4 {
+            let _:serde_json::Value=openwebide_plugin_sdk::request("completion",&json!({"system_prompt":"x","prompt":"y","max_output_tokens":64}))?;
+        }
         let action = if input.budget_bytes == 1 { "create" } else { "list" };
         let operation = if action == "create" { json!({"action":"create","value":{"text":"mutation attempt"}}) } else { json!({"action":"list"}) };
         let _: serde_json::Value = openwebide_plugin_sdk::request("records", &json!({"collection":"notes","operation":operation}))?;
@@ -23,6 +26,11 @@ impl Plugin for Fixture {
                 Ok(Outcome {ok: true, content: response.to_string(), summary: "Host capability response".into()})
             }
             "fixture_panic" => panic!("fixture trap"),
+            "fixture_completion" => {
+                let input=serde_json::from_value(arguments).map_err(|error|error.to_string())?;
+                let response=openwebide_plugin_sdk::complete(&input)?;
+                Ok(Outcome {ok:true,content:response.text,summary:"Text completion".into()})
+            }
             "fixture_loop" => loop { std::hint::black_box(1); },
             "fixture_large_input" => {
                 let response = openwebide_plugin_sdk::HttpResponse {

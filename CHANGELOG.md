@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add capability-gated text completion through configured primary/fast models, with shared input/context/output limits, a 30-second deadline and no tools. Memory Rust source owns its automatic-title prompt, profile fallback and content-derived fallback; UI naming integration and deployment remain in progress.
+
 - Preserve full existing Skills resources during plugin edits, including JSON-escaped data beyond the private-record limit. Bound shared collection pages by serialized bytes and retain the smaller private-record quota.
 
 - Prepare legacy skill tools and catalog context only for enabled API 2 authoring contributions, allowing SDK plugins to own all six skill handlers and context without tool collisions. The unlisted first-party Rust source now implements this behavior; deployment and default migration remain in progress.

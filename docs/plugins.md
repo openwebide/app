@@ -154,6 +154,12 @@ use opaque run grants checked against the authenticated account, session, origin
 project and pinned plugin source/capabilities. Record collections persist across
 plugin updates and reinstalls, with revision checks, bounded pages and quotas.
 Grant tokens stay in host orchestration and are never passed to plugin code.
+The separate `completion` grant exposes bounded text generation through the
+session's configured primary or fast model. Plugins supply prompts and interpret
+the results; the host supplies model selection and credentials. Inputs are limited
+to 32 KiB, outputs to 1–1024 tokens and 16 KiB of text, with a 30-second completion
+deadline and no tools. Context hooks cannot request completions. The source
+Memory plugin owns its naming prompt, profile fallback and content-derived title.
 Further shared collection adapters, job and workspace callbacks, installation progress
 and cancellation, and compiled offline defaults still need implementation. API 2
 first-party plugins remain transitional.

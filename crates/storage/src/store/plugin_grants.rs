@@ -4,7 +4,69 @@ use openwebide_core::plugins::{
     PreparedPlugin, default_bindings, execution::PluginHostRequest, records::RecordRequest,
 };
 
+type AuthorityFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<(PreparedPlugin, openwebide_core::ChatSession), StorageError>,
+            > + Send
+            + 'a,
+    >,
+>;
+
 impl<D: Db> Store<D> {
+    /// General external primitives use this same pinned authority check. Database
+    /// mutations call it inside their transaction; model I/O starts after it ends.
+    pub fn authorize_plugin_host<'a>(
+        &'a self,
+        user: UserId,
+        session: i64,
+        request: &'a PluginHostRequest,
+        now: i64,
+    ) -> AuthorityFuture<'a> {
+        Box::pin(async move {
+            self.db
+                .transaction(|tx| async move {
+                    Store::new(tx)
+                        .plugin_authority_in_transaction(user, session, request, now)
+                        .await
+                })
+                .await
+        })
+    }
+    async fn plugin_authority_in_transaction(
+        &self,
+        user: UserId,
+        session: i64,
+        request: &PluginHostRequest,
+        now: i64,
+    ) -> Result<(PreparedPlugin, openwebide_core::ChatSession), StorageError> {
+        let current = self.get_session(session, user).await?;
+        let grant = self.db.execute("SELECT prepared,project_scope FROM plugin_execution_grants WHERE token=? AND user_id=? AND session_id=? AND expires_at>?", &[
+            DbValue::Text(request.grant.clone()), DbValue::Int(user.get()), DbValue::Int(session), DbValue::Int(now),
+        ]).await?;
+        let row = grant
+            .rows
+            .first()
+            .ok_or_else(|| StorageError::NotFound("Plugin execution grant".into()))?;
+        if row.get_int(1)? != current.project_id.unwrap_or(0) {
+            return Err(StorageError::Conflict(
+                "Plugin execution project changed".into(),
+            ));
+        }
+        let plugin: PreparedPlugin = serde_json::from_str(row.get_text(0)?)
+            .map_err(|error| StorageError::Db(error.to_string()))?;
+        if !plugin
+            .manifest
+            .executable
+            .as_ref()
+            .is_some_and(|rust| rust.capabilities.contains(&request.capability))
+        {
+            return Err(StorageError::InvalidRequest(
+                "Plugin capability is not granted".into(),
+            ));
+        }
+        Ok((plugin, current))
+    }
     /// The API generates the opaque token. Only an enabled, installed receipt can
     /// acquire authority; subsequent updates do not replace this run's snapshot.
     pub async fn issue_plugin_grant(
@@ -57,35 +119,40 @@ impl<D: Db> Store<D> {
         Box<dyn std::future::Future<Output = Result<String, StorageError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            self.db.transaction(|tx| async move {
-            let store = Store::new(tx);
-            let current = store.get_session(session, user).await?;
-            let grant = store.db.execute("SELECT prepared,project_scope FROM plugin_execution_grants WHERE token=? AND user_id=? AND session_id=? AND expires_at>?", &[
-                DbValue::Text(request.grant.clone()), DbValue::Int(user.get()), DbValue::Int(session), DbValue::Int(now),
-            ]).await?;
-            let row = grant.rows.first().ok_or_else(|| StorageError::NotFound("Plugin execution grant".into()))?;
-            if row.get_int(1)? != current.project_id.unwrap_or(0) {
-                return Err(StorageError::Conflict("Plugin execution project changed".into()));
-            }
-            let plugin: PreparedPlugin = serde_json::from_str(row.get_text(0)?).map_err(|error| StorageError::Db(error.to_string()))?;
-            if !plugin.manifest.executable.as_ref().is_some_and(|rust| rust.capabilities.contains(&request.capability)) {
-                return Err(StorageError::InvalidRequest("Plugin capability is not granted".into()));
-            }
-            let namespace = plugin.storage_namespace();
-            match request.capability.as_str() {
-                "records" => {
-                    let command: RecordRequest = serde_json::from_str(&request.payload).map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
-                    let result = store.plugin_records_in_transaction(user, session, &namespace, &command, now).await?;
-                    serde_json::to_string(&result).map_err(|error| StorageError::Db(error.to_string()))
-                }
-                "collections" => {
-                    let command: RecordRequest = serde_json::from_str(&request.payload).map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
-                    let result = store.plugin_collections_in_transaction(user, session, &command, now).await?;
-                    serde_json::to_string(&result).map_err(|error| StorageError::Db(error.to_string()))
-                }
-                _ => Err(StorageError::InvalidRequest("Plugin host capability unavailable".into())),
-            }
-        }).await
+            self.db
+                .transaction(|tx| async move {
+                    let store = Store::new(tx);
+                    let (plugin, _) = store
+                        .plugin_authority_in_transaction(user, session, request, now)
+                        .await?;
+                    let namespace = plugin.storage_namespace();
+                    match request.capability.as_str() {
+                        "records" => {
+                            let command: RecordRequest = serde_json::from_str(&request.payload)
+                                .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                            let result = store
+                                .plugin_records_in_transaction(
+                                    user, session, &namespace, &command, now,
+                                )
+                                .await?;
+                            serde_json::to_string(&result)
+                                .map_err(|error| StorageError::Db(error.to_string()))
+                        }
+                        "collections" => {
+                            let command: RecordRequest = serde_json::from_str(&request.payload)
+                                .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                            let result = store
+                                .plugin_collections_in_transaction(user, session, &command, now)
+                                .await?;
+                            serde_json::to_string(&result)
+                                .map_err(|error| StorageError::Db(error.to_string()))
+                        }
+                        _ => Err(StorageError::InvalidRequest(
+                            "Plugin host capability unavailable".into(),
+                        )),
+                    }
+                })
+                .await
         })
     }
 }
