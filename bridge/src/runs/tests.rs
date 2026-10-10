@@ -22,6 +22,8 @@ struct FakeBackend {
     fail_completion: AtomicBool,
     fail_interim: AtomicBool,
     fail_plan: AtomicBool,
+    hold_plan: AtomicBool,
+    released_leases: Mutex<Vec<String>>,
     fail_queue: AtomicBool,
     queue_deliveries: Mutex<Vec<openwebide_core::QueuedPromptKey>>,
     approval_mode: Mutex<openwebide_core::ApprovalMode>,
@@ -29,6 +31,21 @@ struct FakeBackend {
 }
 
 impl RunBackend for FakeBackend {
+    async fn run_lease(
+        &self,
+        _user: i64,
+        _session: i64,
+        token: &str,
+        release: bool,
+        _since: i64,
+        _permission: Option<&str>,
+    ) -> Result<openwebide_core::scheduled::RunControl, String> {
+        if release {
+            self.released_leases.lock().unwrap().push(token.into());
+        }
+        Ok(Default::default())
+    }
+
     async fn save_tool_timing(
         &self,
         _user: i64,
@@ -123,6 +140,9 @@ impl RunBackend for FakeBackend {
     ) -> Result<RunPlan, String> {
         if self.fail_plan.load(Ordering::SeqCst) {
             return Err("plan failed".into());
+        }
+        if self.hold_plan.load(Ordering::SeqCst) {
+            futures::future::pending::<()>().await;
         }
         let mut plan = plan(
             self.kind.lock().unwrap().clone().unwrap_or(RunKind::Chat),
@@ -1824,4 +1844,41 @@ async fn browser_preferences_reach_bridge_run_context() {
         assert!(context.content.contains("24-hour"));
         assert!(context.content.contains("UTC+05:45"));
     }
+}
+
+#[tokio::test]
+async fn dropping_preparation_releases_the_reservation_and_owned_backend_lease() {
+    use std::future::Future;
+    let registry = RunRegistry::default();
+    let backend = Arc::new(FakeBackend::default());
+    backend.hold_plan.store(true, Ordering::SeqCst);
+    let dir = tempfile::tempdir().unwrap();
+    let principal = user(1);
+    let mut preparing = Box::pin(registry.start(
+        &principal,
+        start("preparing"),
+        dir.path(),
+        backend.clone(),
+        |_| FakeProvider::default(),
+    ));
+    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+    assert!(preparing.as_mut().poll(&mut context).is_pending());
+    let run = registry.get(&principal, "preparing").unwrap();
+    assert!(registry.list(&principal, 1)[0].running);
+    drop(preparing);
+    assert!(matches!(
+        run.scheduled_status().0,
+        Some(RunEvent::Cancelled)
+    ));
+    assert!(!registry.list(&principal, 1)[0].running);
+    tokio::task::yield_now().await;
+    assert!(
+        backend
+            .released_leases
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == "preparing")
+    );
+    assert!(registry.reserve(&principal, &start("replacement")).is_ok());
 }

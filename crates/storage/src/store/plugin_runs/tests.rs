@@ -352,7 +352,7 @@ fn consumed_submissions_are_never_reinjected_and_cancel_only_their_own_active_ru
                 .session_run_lease(
                     f.user,
                     f.session,
-                    &format!("plugin-run-{}", first.id),
+                    &format!("plugin-run-{}-opaque", first.id),
                     false,
                     0,
                 )
@@ -665,6 +665,230 @@ fn projectless_runs_keep_a_separate_owned_namespace() {
                 .plugin_context_host_request(f.user, &request, 2)
                 .await
                 .is_err()
+        );
+    });
+}
+
+#[test]
+fn run_claims_are_host_bound_and_recover_only_unconsumed_prompts_in_both_modes() {
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            if mode == WorkspaceMode::Local {
+                f.store
+                    .set_user_setting(
+                        f.user,
+                        &format!("scheduled_host_{}", f.project),
+                        &encode(&openwebide_core::scheduled::HostBinding {
+                            host_id: f.plugin.host_id.clone(),
+                            path: "repos/local".into(),
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let submitted = f
+                .request(&Fixture::submission("one"))
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            let original = f
+                .store
+                .list_queued_prompts(f.user, f.session)
+                .await
+                .unwrap()
+                .remove(0);
+            assert!(
+                f.store
+                    .claim_plugin_runs("other-host", 0, &"b".repeat(32), 3)
+                    .await
+                    .unwrap()
+                    .runs
+                    .is_empty()
+            );
+            let first = f
+                .store
+                .claim_plugin_runs(&f.plugin.host_id, 0, &"b".repeat(32), 3)
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            assert_eq!(first.run.id, submitted.id);
+            assert_eq!(first.prompt.revision, original.revision + 1);
+            assert_eq!(first.host_path.is_some(), mode == WorkspaceMode::Local);
+            assert!(
+                f.store
+                    .claim_plugin_runs(&f.plugin.host_id, 0, &"c".repeat(32), 4)
+                    .await
+                    .unwrap()
+                    .runs
+                    .is_empty()
+            );
+            f.store.renew_plugin_run(&first.lease, 4).await.unwrap();
+            let recovered = f
+                .store
+                .claim_plugin_runs(&f.plugin.host_id, 0, &"d".repeat(32), 124)
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            assert_ne!(first.run_id(), recovered.run_id());
+            assert_eq!(recovered.prompt.revision, first.prompt.revision + 1);
+            assert!(f.store.renew_plugin_run(&first.lease, 125).await.is_err());
+            f.store
+                .session_run_lease(f.user, f.session, &recovered.run_id(), false, 125)
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .consume_queued_prompt(
+                        f.user,
+                        f.session,
+                        first.prompt.key(),
+                        &first.prompt.content,
+                        125
+                    )
+                    .await
+                    .is_err()
+            );
+            f.store
+                .consume_queued_prompt(
+                    f.user,
+                    f.session,
+                    recovered.prompt.key(),
+                    &recovered.prompt.content,
+                    125,
+                )
+                .await
+                .unwrap();
+            let blocked = RunReport {
+                state: RunState::Blocked,
+                detail: "Awaiting approval".into(),
+                permission_id: Some("permission".into()),
+            };
+            f.store
+                .report_plugin_run(&recovered.lease, &blocked, 126)
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .report_plugin_run(&first.lease, &blocked, 126)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                f.store
+                    .release_plugin_run(&recovered.lease, 127)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                f.store
+                    .claim_plugin_runs(&f.plugin.host_id, 0, &"e".repeat(32), 246)
+                    .await
+                    .unwrap()
+                    .runs
+                    .is_empty()
+            );
+            let current = f
+                .request(&RunRequest::Read { id: submitted.id })
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            assert_eq!(current.state, RunState::Interrupted);
+            assert!(current.permission_id.is_none());
+            assert!(
+                f.store
+                    .list_queued_prompts(f.user, f.session)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    });
+}
+#[test]
+fn run_status_acknowledgements_release_busy_claims_and_reject_wrong_identity() {
+    block_on(async {
+        let f = Fixture::new(WorkspaceMode::Remote).await;
+        let submitted = f
+            .request(&Fixture::submission("one"))
+            .await
+            .unwrap()
+            .runs
+            .remove(0);
+        let first = f
+            .store
+            .claim_plugin_runs(&f.plugin.host_id, 0, &"b".repeat(32), 3)
+            .await
+            .unwrap()
+            .runs
+            .remove(0);
+        f.store.release_plugin_run(&first.lease, 4).await.unwrap();
+        assert!(f.store.release_plugin_run(&first.lease, 4).await.is_err());
+        let delivery = f
+            .store
+            .claim_plugin_runs(&f.plugin.host_id, 0, &"c".repeat(32), 5)
+            .await
+            .unwrap()
+            .runs
+            .remove(0);
+        let mut wrong = delivery.lease.clone();
+        wrong.host_id = "foreign".into();
+        assert!(f.store.renew_plugin_run(&wrong, 6).await.is_err());
+        let done = RunReport {
+            state: RunState::Completed,
+            detail: "Source interpretation belongs in the plugin".into(),
+            permission_id: None,
+        };
+        assert!(
+            f.store
+                .report_plugin_run(&delivery.lease, &done, 6)
+                .await
+                .is_err()
+        );
+        f.store
+            .session_run_lease(f.user, f.session, &delivery.run_id(), false, 6)
+            .await
+            .unwrap();
+        f.store
+            .consume_queued_prompt(
+                f.user,
+                f.session,
+                delivery.prompt.key(),
+                &delivery.prompt.content,
+                6,
+            )
+            .await
+            .unwrap();
+        f.store
+            .report_plugin_run(&delivery.lease, &done, 7)
+            .await
+            .unwrap();
+        f.store
+            .report_plugin_run(&delivery.lease, &done, 8)
+            .await
+            .unwrap();
+        let changed = RunReport {
+            detail: "changed".into(),
+            ..done
+        };
+        assert!(
+            f.store
+                .report_plugin_run(&delivery.lease, &changed, 8)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            f.request(&RunRequest::Read { id: submitted.id })
+                .await
+                .unwrap()
+                .runs[0]
+                .state,
+            RunState::Completed
         );
     });
 }

@@ -181,7 +181,7 @@ impl<D: Db> Store<D> {
             }
             let plugin = store.db.execute("SELECT r.id FROM plugin_runs r WHERE r.queued_id=?", &[DbValue::Int(key.id)]).await?;
             if let Some(row) = plugin.rows.first() {
-                let allowed = store.db.execute("SELECT 1 FROM plugin_runs r JOIN session_run_leases l ON l.session_id=r.session_id WHERE r.id=? AND r.state='leased' AND l.token=('plugin-run-' || r.id) AND l.expires_at>? AND r.lease_expires_at>?", &[DbValue::Int(row.get_int(0)?), DbValue::Int(created_at), DbValue::Int(created_at)]).await?;
+                let allowed = store.db.execute("SELECT 1 FROM plugin_runs r JOIN session_run_leases l ON l.session_id=r.session_id WHERE r.id=? AND r.state='leased' AND l.token=('plugin-run-' || r.id || '-' || r.lease) AND l.expires_at>? AND r.lease_expires_at>?", &[DbValue::Int(row.get_int(0)?), DbValue::Int(created_at), DbValue::Int(created_at)]).await?;
                 if allowed.rows.is_empty() { return Err(StorageError::Conflict("Plugin prompts are delivered by their execution host".into())); }
             }
             let message = store.insert_interim_message_unlocked(session, Role::User, content, created_at, None, None).await?;

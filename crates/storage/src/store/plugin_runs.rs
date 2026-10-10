@@ -134,7 +134,7 @@ impl<D: Db> Store<D> {
             } => {
                 let mut params = scope.clone();
                 params.push(DbValue::Int(*selected));
-                let rows = self.db.execute(&format!("SELECT {COLUMNS},queued_id FROM plugin_runs WHERE user_id=? AND project_scope=? AND plugin=? AND id=?"), &params).await?;
+                let rows = self.db.execute(&format!("SELECT {COLUMNS},queued_id,lease FROM plugin_runs WHERE user_id=? AND project_scope=? AND plugin=? AND id=?"), &params).await?;
                 let row = rows
                     .rows
                     .first()
@@ -177,7 +177,7 @@ impl<D: Db> Store<D> {
                         .await?;
                 }
                 if delivered && let Some(session) = current.session_id {
-                    let active = self.db.execute("SELECT 1 FROM session_run_leases WHERE session_id=? AND token=? AND expires_at>?", &[DbValue::Int(session), DbValue::Text(format!("plugin-run-{selected}")), DbValue::Int(now)]).await?;
+                    let active = self.db.execute("SELECT 1 FROM session_run_leases WHERE session_id=? AND token=? AND expires_at>?", &[DbValue::Int(session), DbValue::Text(format!("plugin-run-{selected}-{}", row.get_text(10)?)), DbValue::Int(now)]).await?;
                     if !active.rows.is_empty() {
                         self.request_cancel(session, now.saturating_mul(1000).saturating_add(1))
                             .await?;
@@ -237,3 +237,138 @@ impl<D: Db> Store<D> {
 
 #[cfg(test)]
 mod tests;
+
+fn expiry(now: i64) -> Result<i64, StorageError> {
+    if now < 0 {
+        return Err(StorageError::InvalidRequest("Invalid run clock".into()));
+    }
+    now.checked_add(120)
+        .ok_or_else(|| StorageError::InvalidRequest("Invalid run lease expiry".into()))
+}
+fn lease_token(value: &str) -> Result<(), StorageError> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StorageError::InvalidRequest("Invalid run lease".into()));
+    }
+    Ok(())
+}
+impl<D: Db> Store<D> {
+    pub async fn claim_plugin_runs(
+        &self,
+        host: &str,
+        after: i64,
+        token: &str,
+        now: i64,
+    ) -> Result<RunDeliveryPage, StorageError> {
+        lease_token(token)?;
+        let until = expiry(now)?;
+        if host.is_empty() || host.len() > 1024 || after < 0 {
+            return Err(StorageError::InvalidRequest("Invalid run claim".into()));
+        }
+        self.db.transaction(|tx| async move {
+            let store=Store::new(tx);
+            // Recovery is allowed only while the prompt remains unconsumed.
+            store.db.execute("UPDATE plugin_runs SET state='pending',revision=revision+1,lease=NULL,lease_expires_at=NULL WHERE host_id=? AND state='leased' AND lease_expires_at<=? AND queued_id IS NOT NULL AND message_id IS NULL", &[DbValue::Text(host.into()),DbValue::Int(now)]).await?;
+            store.db.execute("UPDATE plugin_runs SET state='interrupted',revision=revision+1,permission_id=NULL,detail='Host stopped after prompt delivery; the prompt will not be replayed' WHERE host_id=? AND state IN ('leased','running','blocked','cancelling') AND lease_expires_at<=? AND message_id IS NOT NULL", &[DbValue::Text(host.into()),DbValue::Int(now)]).await?;
+            let rows=store.db.execute(&format!("SELECT {COLUMNS},user_id,prepared,context,queued_id FROM plugin_runs WHERE host_id=? AND state='pending' AND id>? ORDER BY id LIMIT 64"), &[DbValue::Text(host.into()),DbValue::Int(after)]).await?;
+            let more=rows.rows.len()==64; let mut cursor=after; let mut deliveries=Vec::new();
+            for row in &rows.rows {
+                if deliveries.len()==8 { return Ok(RunDeliveryPage{runs:deliveries,next_after:Some(cursor)}); }
+                let mut entry=run(row)?; cursor=entry.id;
+                let user=UserId::new(row.get_int(9)?);
+                let prepared:PreparedPlugin=serde_json::from_str(row.get_text(10)?).map_err(|error|StorageError::Db(error.to_string()))?;
+                let context:PluginExecutionContext=serde_json::from_str(row.get_text(11)?).map_err(|error|StorageError::Db(error.to_string()))?;
+                if !store.plugin_namespace_enabled(user,&context,&prepared).await? {continue;}
+                let Some(session)=entry.session_id else {continue;};
+                if store.session_run_active(user,session,now).await? {continue;}
+                let queue=store.list_queued_prompts(user,session).await?;
+                let Some(prompt)=queue.first().filter(|prompt|Some(prompt.id)==row.get_int_opt(12)) else {continue;};
+                let host_path=match context.project_id {
+                    Some(project) if store.get_project(project,user).await?.mode==WorkspaceMode::Local => {
+                        let Some(binding)=store.get_user_setting(user,&format!("scheduled_host_{project}")).await? else {continue;};
+                        let binding:openwebide_core::scheduled::HostBinding=serde_json::from_str(&binding).map_err(|error|StorageError::Db(error.to_string()))?;
+                        if binding.host_id!=host || binding.path.is_empty() || binding.path.len()>4096 {continue;}
+                        Some(binding.path)
+                    }
+                    _=>None,
+                };
+                entry.state=RunState::Leased; entry.revision+=1;
+                store.db.execute("UPDATE plugin_runs SET state='leased',revision=revision+1,lease=?,lease_expires_at=? WHERE id=?", &[DbValue::Text(token.into()),DbValue::Int(until),DbValue::Int(entry.id)]).await?;
+                let mut prompt = prompt.clone();
+                store.db.execute("UPDATE queued_prompts SET revision=revision+1 WHERE id=?", &[DbValue::Int(prompt.id)]).await?;
+                prompt.revision += 1;
+                deliveries.push(RunDelivery{user_id:user.get(),run:entry,prompt,host_path,lease:RunLease{host_id:host.into(),id:cursor,lease:token.into()},lease_expires_at:until});
+            }
+            Ok(RunDeliveryPage{runs:deliveries,next_after:more.then_some(cursor)})
+        }).await
+    }
+    async fn run_lease_in_transaction(
+        &self,
+        lease: &RunLease,
+        now: i64,
+    ) -> Result<PluginRun, StorageError> {
+        lease_token(&lease.lease)?;
+        expiry(now)?;
+        let rows=self.db.execute(&format!("SELECT {COLUMNS} FROM plugin_runs WHERE id=? AND host_id=? AND lease=? AND lease_expires_at>?"), &[DbValue::Int(lease.id),DbValue::Text(lease.host_id.clone()),DbValue::Text(lease.lease.clone()),DbValue::Int(now)]).await?;
+        rows.rows
+            .first()
+            .map(run)
+            .transpose()?
+            .ok_or_else(|| StorageError::Conflict("Plugin run lease is no longer current".into()))
+    }
+    pub async fn renew_plugin_run(
+        &self,
+        lease: &RunLease,
+        now: i64,
+    ) -> Result<RunLeaseStatus, StorageError> {
+        let until = expiry(now)?;
+        self.db
+            .transaction(|tx| async move {
+                let store = Store::new(tx);
+                let current = store.run_lease_in_transaction(lease, now).await?;
+                if current.state.terminal() {
+                    return Err(StorageError::Conflict("Run already finished".into()));
+                }
+                store
+                    .db
+                    .execute(
+                        "UPDATE plugin_runs SET lease_expires_at=? WHERE id=?",
+                        &[DbValue::Int(until), DbValue::Int(lease.id)],
+                    )
+                    .await?;
+                Ok(RunLeaseStatus {
+                    expires_at: until,
+                    cancel_requested: current.state == RunState::Cancelling,
+                })
+            })
+            .await
+    }
+    pub async fn report_plugin_run(
+        &self,
+        lease: &RunLease,
+        report: &RunReport,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        report.validate().map_err(StorageError::InvalidRequest)?;
+        let until = expiry(now)?;
+        self.db.transaction(|tx| async move {
+            let store=Store::new(tx); let current=store.run_lease_in_transaction(lease,now).await?;
+            if current.state.terminal() {
+                return if current.state==report.state && current.detail==report.detail && current.permission_id==report.permission_id {Ok(())} else {Err(StorageError::Conflict("Run already finished".into()))};
+            }
+            if current.message_id.is_none() && !matches!(report.state,RunState::Failed|RunState::Cancelled) {return Err(StorageError::Conflict("Run prompt has not been delivered".into()));}
+            let state=if current.state==RunState::Cancelling && !report.state.terminal() {RunState::Cancelling} else {report.state.clone()};
+            let serialized=encode(&state)?; let state=serialized.trim_matches('"');
+            store.db.execute("UPDATE plugin_runs SET state=?,revision=revision+1,detail=?,permission_id=?,lease_expires_at=? WHERE id=?", &[DbValue::Text(state.into()),DbValue::Text(report.detail.clone()),if state=="cancelling" {DbValue::Null} else {report.permission_id.clone().map_or(DbValue::Null,DbValue::Text)},DbValue::Int(until),DbValue::Int(lease.id)]).await?;
+            if report.state.terminal() {store.db.execute("DELETE FROM queued_prompts WHERE id=(SELECT queued_id FROM plugin_runs WHERE id=?)", &[DbValue::Int(lease.id)]).await?;}
+            Ok(())
+        }).await
+    }
+    pub async fn release_plugin_run(&self, lease: &RunLease, now: i64) -> Result<(), StorageError> {
+        self.db.transaction(|tx| async move {
+            let store=Store::new(tx); let current=store.run_lease_in_transaction(lease,now).await?;
+            if current.state!=RunState::Leased || current.message_id.is_some() {return Err(StorageError::Conflict("Only an undelivered run can return to the queue".into()));}
+            store.db.execute("UPDATE plugin_runs SET state='pending',revision=revision+1,lease=NULL,lease_expires_at=NULL WHERE id=?", &[DbValue::Int(lease.id)]).await?;
+            Ok(())
+        }).await
+    }
+}

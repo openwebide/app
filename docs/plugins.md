@@ -215,7 +215,12 @@ models stay on the queued run rather than changing conversation settings.
 Plugin prompts are marked for host delivery and cannot be edited or drained by
 the browser's foreground queue. Removing one cancels its pending submission.
 Queue consumption and the user message commit together; consumed prompts cannot
-be replayed. Raw run dispatch and completion delivery are still being connected;
+be replayed. Internal daemon claims, lease renewal, busy-claim release and status
+reports share the same durable store. Each claim receives a fresh queue revision
+and runner identity, so stale preparations cannot consume replacement claims.
+Recovery requeues only unconsumed prompts; a lost host after consumption marks the
+run interrupted. Local execution requires a user-authorized host folder binding.
+Raw run dispatch and completion delivery are still being connected;
 these primitives do not complete the executable Scheduling migration.
 
 Skills collection writes accept a `draft` object using the existing skill schema.

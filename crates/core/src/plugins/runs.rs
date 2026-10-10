@@ -131,3 +131,99 @@ pub struct RunResult {
     pub runs: Vec<PluginRun>,
     pub next_after: Option<i64>,
 }
+
+/// Host-only delivery authority; not part of the SDK request envelope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunLease {
+    pub host_id: String,
+    pub id: i64,
+    pub lease: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunDelivery {
+    pub user_id: i64,
+    pub run: PluginRun,
+    pub prompt: crate::QueuedPrompt,
+    pub host_path: Option<String>,
+    pub lease: RunLease,
+    pub lease_expires_at: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunDeliveryPage {
+    pub runs: Vec<RunDelivery>,
+    pub next_after: Option<i64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunLeaseStatus {
+    pub expires_at: i64,
+    pub cancel_requested: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunReport {
+    pub state: RunState,
+    pub detail: String,
+    pub permission_id: Option<String>,
+}
+impl RunReport {
+    pub fn validate(&self) -> Result<(), String> {
+        if !matches!(
+            self.state,
+            RunState::Running
+                | RunState::Blocked
+                | RunState::Completed
+                | RunState::Failed
+                | RunState::Cancelled
+        ) || self.detail.len() > 4096
+            || self.permission_id.as_ref().is_some_and(|id| {
+                id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+            })
+            || (self.state != RunState::Blocked && self.permission_id.is_some())
+        {
+            return Err("Invalid plugin run report".into());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunServiceRequest {
+    Claim {
+        host_id: String,
+        #[serde(default)]
+        after: i64,
+    },
+    Renew {
+        delivery: RunLease,
+    },
+    Report {
+        delivery: RunLease,
+        report: RunReport,
+    },
+    Release {
+        delivery: RunLease,
+    },
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "action",
+    content = "result",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum RunServiceResponse {
+    Claimed(RunDeliveryPage),
+    Renewed(RunLeaseStatus),
+    Reported,
+    Released,
+}
+
+impl RunDelivery {
+    pub fn run_id(&self) -> String {
+        format!("plugin-run-{}-{}", self.lease.id, self.lease.lease)
+    }
+}

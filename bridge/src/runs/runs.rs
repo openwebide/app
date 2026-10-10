@@ -186,6 +186,29 @@ pub(crate) struct RunHost {
     pub plugins: crate::plugins::transport::PluginExecutionHost,
 }
 
+/// A dropped preparation must not leave a conversation permanently reserved.
+struct PreparationGuard<B: RunBackend + 'static> {
+    run: Arc<Run>,
+    backend: Arc<B>,
+    armed: bool,
+}
+impl<B: RunBackend + 'static> Drop for PreparationGuard<B> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.run.cancel.cancel();
+        self.run.emit(RunEvent::Cancelled);
+        let run = self.run.clone();
+        let backend = self.backend.clone();
+        tokio::spawn(async move {
+            let _ = backend
+                .run_lease(run.owner, run.session_id, &run.run_id, true, 0, None)
+                .await;
+        });
+    }
+}
+
 impl RunRegistry {
     /// Selected once at the server/paired-companion capability boundary.
     pub(crate) fn configure_host_administration(&self, allowed: bool) {
@@ -324,6 +347,11 @@ impl RunRegistry {
             run.emit(RunEvent::Cancelled);
             return Ok(run);
         }
+        let mut preparation = PreparationGuard {
+            run: run.clone(),
+            backend: backend.clone(),
+            armed: true,
+        };
         let prepared = async {
             let mut plan = match start.queued_prompt {
                 Some(key) => {
@@ -408,10 +436,12 @@ impl RunRegistry {
                 let _ = backend
                     .run_lease(user_id, start.session_id, &start.run_id, true, 0, None)
                     .await;
+                preparation.armed = false;
                 self.runs.lock().unwrap().remove(&start.run_id);
                 return Err(error);
             }
         };
+        preparation.armed = false;
         let provider = provider(&plan);
         run.emit(RunEvent::Message {
             message: message.clone(),
