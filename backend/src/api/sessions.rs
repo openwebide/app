@@ -475,6 +475,18 @@ pub(super) async fn build_run_plan(
     };
     super::plugins::ensure_bundled_plugins(state, user_id).await;
     let skills = state.store.session_skills(user_id, session_id).await?;
+    if session.project_id.is_none()
+        && state
+            .store
+            .get_user(user_id)
+            .await?
+            .is_some_and(|user| user.role == openwebide_core::UserRole::Admin)
+        && state.store.host_connection().await?.is_configured()
+    {
+        input
+            .tools
+            .extend(openwebide_agent::host_admin::definitions());
+    }
     let plugin_bindings = if let Some(project) = session.project_id {
         state.store.project_plugins(user_id, project).await?
     } else {
@@ -492,33 +504,25 @@ pub(super) async fn build_run_plan(
             context_limit: runtime.settings.context_limit,
         },
     );
-    let mut plan = openwebide_agent::session::plan_with_plugins(&runtime, input, &plugin_bindings)
-        .map_err(ApiError::bad_request)?;
-    plan.plugin_grants =
-        super::plugins::execution_grants(state, user_id, session_id, &plan.plugin_executables)
-            .await?;
+    let plugin_host = super::plugins::PlanningHost::new(state, user_id, session_id);
+    let plan = openwebide_agent::session::plan_with_plugin_context(
+        &runtime,
+        input,
+        &plugin_bindings,
+        &plugin_host,
+        plugin_host.clone(),
+        |plugins| async move {
+            super::plugins::execution_grants(state, user_id, session_id, &plugins)
+                .await
+                .map_err(|error| {
+                    error.log_for_route("POST", "/api/sessions/run-plan");
+                    error.public_message().to_owned()
+                })
+        },
+    )
+    .await;
+    let mut plan = plan.map_err(ApiError::bad_request)?;
     plan.plugin_skills = openwebide_agent::skills::package_snapshot(&skills);
-    if session.project_id.is_none()
-        && state
-            .store
-            .get_user(user_id)
-            .await?
-            .is_some_and(|user| user.role == openwebide_core::UserRole::Admin)
-        && runtime.settings.tools != Some(false)
-        && state.store.host_connection().await?.is_configured()
-    {
-        plan.request
-            .tools
-            .extend(openwebide_agent::host_admin::definitions());
-        plan.connection
-            .tool_selection
-            .apply(&mut plan.request.tools);
-        plan.kind = if plan.request.tools.is_empty() {
-            RunKind::Chat
-        } else {
-            RunKind::WebChat
-        };
-    }
     plan.validate_prompt().map_err(ApiError::bad_request)?;
     Ok(plan)
 }
@@ -612,6 +616,8 @@ pub(crate) async fn send_session_message(
             user_message,
             request,
             plan.plugin_skills,
+            plan.plugin_executables,
+            plan.plugin_grants,
             provider,
             base,
             plan.environment,

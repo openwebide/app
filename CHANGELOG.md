@@ -9,7 +9,11 @@ for what's still ahead.
 
 ## [Unreleased]
 
-- Add capability-gated CRUD for existing Memory UI records and read-only Rust SDK context hooks on the host protocol. Keep search and context policy in Memory plugin source; run-planning integration and default migration remain in progress.
+- Run read-only Rust SDK context hooks through shared planning before model tool selection in local and remote sessions. Enforce prompt budgets, grant scope and disabling only the plugin's own tools, including when model tools are disabled.
+
+- Route backend SSE tools and child tasks through the shared SDK executor and approval gate, preventing failed SDK tools from falling back to built-in behavior. Expire abandoned host invocations without waiting for another request.
+
+- Add capability-gated CRUD for existing Memory UI records and read-only Rust SDK context hooks on the host protocol. Keep search and context policy in Memory plugin source; default migration and full lifecycle verification remain in progress.
 
 - Compile plugin source in normal Linux containers using an unprivileged compiler launcher with filesystem and syscall restrictions. Isolate dependency retrieval, retain macOS/native Linux build adapters, and package the pinned compiler and launcher. Offline executable defaults and first-party migrations remain in progress.
 

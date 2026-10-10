@@ -406,8 +406,8 @@ capability.
   distribution and source-authoring/custom-marketplace workflow, and verify the
   complete install/run/update lifecycle through both host adapters.
 - Complete installation and run verification of the plugin-owned Web and Memory
-  sources. Connect Memory context to run planning and move model-assisted naming
-  into plugin code over a general completion primitive. Replace transitional
+  sources. Move model-assisted Memory naming into plugin code over a general
+  completion primitive. Replace transitional
   Scheduling and Skill Authoring tool-group feature switches with plugin-owned
   implementations.
   Require the same public SDK, interfaces and privileges as community plugins:
@@ -420,8 +420,8 @@ capability.
   runtime contracts, capability grants and dependency/configuration validation.
   Build on the MCP client and [database-backed project skills](agent-skills.md);
   keep discovery and context loading bounded through deferred tool loading.
-  Connect the read-only SDK context hook to the shared run planner and add further
-  run hooks when needed. Core workspace tools remain built in.
+  Add further run hooks when needed, building on the shared read-only SDK context
+  planner. Core workspace tools remain built in.
 - Add host-side update checks while all clients are closed, extending the existing
   Notify, Automatic compatible and Off policies. Persist check state and update
   availability, bound polling/retries, and surface results in the existing Plugins

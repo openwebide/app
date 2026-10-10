@@ -18,6 +18,10 @@ pub trait PluginTransport: Clone + Send + Sync {
     ) -> impl Future<Output = Result<PluginInvocation, String>> + Send;
     /// Runtime primitive: cancellation must also run when the calling future drops.
     fn cancel(&self, id: String);
+    /// Flush cancellation requests on adapters without a background executor.
+    fn flush_cancellations(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 pub trait PluginServices: Send + Sync {
     fn request(
@@ -120,90 +124,123 @@ impl<E, T: PluginTransport, S: PluginServices> PluginTools<E, T, S> {
         plugin: &PreparedPlugin,
         call: &ToolCall,
     ) -> Result<ToolOutcome, String> {
-        let mut invocation = self
-            .transport
-            .start(InvokePlugin {
+        invoke_plugin(
+            &self.transport,
+            &self.services,
+            InvokePlugin {
                 operation: openwebide_core::plugins::execution::PluginOperation::Tool,
                 prepared: plugin.clone(),
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),
-            })
-            .await?;
-        let mut guard = InvocationGuard {
-            transport: self.transport.clone(),
-            id: Some(invocation.id.clone()),
-        };
-        let mut started = false;
-        let mut last_sequence = 0;
-        // Initial handshake, up to 128 imports, and the terminal result.
-        for _ in 0..130 {
-            if invocation.id != guard.id.as_deref().unwrap_or_default() {
-                return Err("Plugin transport changed invocation identity.".into());
-            }
-            match invocation.step {
-                PluginStep::Ready => {
-                    if started {
-                        return Err("Plugin transport repeated its initial handshake.".into());
-                    }
-                    started = true;
-                    invocation = self
-                        .transport
-                        .resume(ContinuePlugin {
-                            id: invocation.id,
-                            sequence: 0,
-                            response: Ok(String::new()),
-                        })
-                        .await?;
+            },
+        )
+        .await
+    }
+}
+
+/// One bounded invocation workflow for tools and planning hooks on every host.
+pub async fn invoke_plugin<T: PluginTransport, S: PluginServices>(
+    transport: &T,
+    services: &S,
+    call: InvokePlugin,
+) -> Result<ToolOutcome, String> {
+    let result = invoke_inner(transport, services, call).await;
+    transport.flush_cancellations().await;
+    result
+}
+
+async fn invoke_inner<T: PluginTransport, S: PluginServices>(
+    transport: &T,
+    services: &S,
+    call: InvokePlugin,
+) -> Result<ToolOutcome, String> {
+    let context = matches!(
+        call.operation,
+        openwebide_core::plugins::execution::PluginOperation::Context
+    );
+    let plugin = call.prepared.clone();
+    let mut invocation = transport.start(call).await?;
+    let mut guard = InvocationGuard {
+        transport: transport.clone(),
+        id: Some(invocation.id.clone()),
+    };
+    let mut started = false;
+    let mut last_sequence = 0;
+    // Initial handshake, up to 128 imports, and the terminal result.
+    for _ in 0..130 {
+        if invocation.id != guard.id.as_deref().unwrap_or_default() {
+            return Err("Plugin transport changed invocation identity.".into());
+        }
+        match invocation.step {
+            PluginStep::Ready => {
+                if started {
+                    return Err("Plugin transport repeated its initial handshake.".into());
                 }
-                PluginStep::Complete {
+                started = true;
+                invocation = transport
+                    .resume(ContinuePlugin {
+                        id: invocation.id,
+                        sequence: 0,
+                        response: Ok(String::new()),
+                    })
+                    .await?;
+            }
+            PluginStep::Complete {
+                ok,
+                content,
+                summary,
+            } => {
+                guard.id = None;
+                return Ok(ToolOutcome {
                     ok,
                     content,
                     summary,
-                } => {
-                    guard.id = None;
-                    return Ok(ToolOutcome {
-                        ok,
-                        content,
-                        summary,
-                        diff: None,
-                    });
+                    diff: None,
+                });
+            }
+            PluginStep::Failed { error } => {
+                guard.id = None;
+                return Err(error);
+            }
+            PluginStep::HostCall {
+                sequence,
+                capability,
+                payload,
+            } => {
+                if !started || sequence <= last_sequence || sequence > 128 {
+                    return Err("Plugin transport returned a stale host call.".into());
                 }
-                PluginStep::Failed { error } => {
-                    guard.id = None;
-                    return Err(error);
+                last_sequence = sequence;
+                let executable = plugin
+                    .manifest
+                    .executable
+                    .as_ref()
+                    .ok_or("Plugin has no executable")?;
+                if !executable.capabilities.contains(&capability) {
+                    return Err("Plugin requested an undeclared capability.".into());
                 }
-                PluginStep::HostCall {
-                    sequence,
-                    capability,
-                    payload,
-                } => {
-                    if !started || sequence <= last_sequence || sequence > 128 {
-                        return Err("Plugin transport returned a stale host call.".into());
-                    }
-                    last_sequence = sequence;
-                    let executable = plugin
-                        .manifest
-                        .executable
-                        .as_ref()
-                        .ok_or("Plugin has no executable")?;
-                    if !executable.capabilities.contains(&capability) {
-                        return Err("Plugin requested an undeclared capability.".into());
-                    }
-                    let response = self.services.request(plugin, &capability, &payload).await;
-                    invocation = self
-                        .transport
-                        .resume(ContinuePlugin {
-                            id: invocation.id,
-                            sequence,
-                            response,
-                        })
-                        .await?;
+                if context
+                    && !openwebide_core::plugins::execution::context_request_allowed(
+                        &capability,
+                        &payload,
+                    )
+                {
+                    return Err("Plugin context hooks cannot mutate host state".into());
                 }
+                let response = services.request(&plugin, &capability, &payload).await;
+                invocation = transport
+                    .resume(ContinuePlugin {
+                        id: invocation.id,
+                        sequence,
+                        response,
+                    })
+                    .await?;
             }
         }
-        Err("Plugin exceeded its host-call limit.".into())
     }
+    Err("Plugin exceeded its host-call limit.".into())
 }
+
 impl<E: ToolExecutor + Sync, T: PluginTransport, S: PluginServices> ToolExecutor
     for PluginTools<E, T, S>
 {

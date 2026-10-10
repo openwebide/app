@@ -2995,6 +2995,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "openwebide-core",
  "openwebide-plugin-sdk",
  "serde_json",
  "sha2 0.11.0",

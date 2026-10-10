@@ -19,6 +19,40 @@ use tokio::sync::{Mutex, mpsc as async_mpsc};
 pub struct Invocations {
     entries: Arc<Mutex<HashMap<String, Arc<Invocation>>>>,
 }
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn abandoned_invocations_expire_without_another_install_or_call() {
+        let invocations = Invocations::default();
+        let (_, events) = async_mpsc::channel(1);
+        let entry = Arc::new(Invocation {
+            owner: "paired-host".into(),
+            started: Instant::now(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            state: Mutex::new(InvocationState {
+                deferred: None,
+                events,
+                pending: None,
+            }),
+        });
+        invocations
+            .entries
+            .lock()
+            .await
+            .insert("abandoned".into(), entry.clone());
+        let notified = entry.notify.notified();
+        invocations.expire_after("abandoned".into(), Duration::from_millis(10));
+        tokio::time::timeout(Duration::from_secs(2), notified)
+            .await
+            .expect("expiry should wake a waiting invocation");
+        assert!(entry.cancelled.load(Ordering::Relaxed));
+        assert!(invocations.entry("abandoned").await.is_err());
+    }
+}
 #[derive(Debug)]
 struct Invocation {
     owner: String,
@@ -43,6 +77,7 @@ struct DeferredInvocation {
 impl Drop for Invocation {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
     }
 }
 #[derive(Debug)]
@@ -103,6 +138,16 @@ impl HostServices for Services {
     }
 }
 impl Invocations {
+    fn expire_after(&self, id: String, ttl: Duration) {
+        let entries = self.entries.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(ttl).await;
+            if let Some(entry) = entries.lock().await.remove(&id) {
+                entry.cancelled.store(true, Ordering::Relaxed);
+                entry.notify.notify_waiters();
+            }
+        });
+    }
     pub async fn start(
         &self,
         installer: &NativePluginInstaller,
@@ -173,6 +218,9 @@ impl Invocations {
             }
             entries.insert(id.clone(), entry);
         }
+        // Reclaim abandoned request/response invocations even when no later
+        // request arrives to trigger the admission-time cleanup.
+        self.expire_after(id.clone(), Duration::from_secs(300));
         // No plugin code runs until the caller receives the id and resumes it.
         Ok(PluginInvocation {
             id,

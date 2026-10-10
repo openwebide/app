@@ -222,6 +222,44 @@ mod tests {
                     .issue_plugin_grant(user, session, &shared, &token, 4)
                     .await
                     .unwrap();
+                let projectless = store
+                    .create_session("projectless", None, None, None, user, 4)
+                    .await
+                    .unwrap()
+                    .id;
+                let global_token = "c".repeat(32);
+                store
+                    .issue_plugin_grant(user, projectless, &shared, &global_token, 4)
+                    .await
+                    .unwrap();
+                let global: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(
+                            user,
+                            projectless,
+                            &call(&global_token, list.clone()),
+                            5,
+                        )
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(global["enabled"], false);
+                assert_eq!(global["records"], json!([]));
+                assert!(
+                    store
+                        .plugin_host_request(
+                            user,
+                            projectless,
+                            &call(
+                                &global_token,
+                                json!({"action":"create","value":{"title":"x","content":"y"}})
+                            ),
+                            5
+                        )
+                        .await
+                        .is_err()
+                );
                 let read = store
                     .plugin_host_request(user, session, &call(&token, list.clone()), 5)
                     .await

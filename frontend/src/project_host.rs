@@ -344,6 +344,12 @@ pub enum ProjectExecution {
     Local(BrowserBridgeClient),
 }
 impl ProjectExecution {
+    pub fn local_bridge(&self) -> Option<BrowserBridgeClient> {
+        match self {
+            Self::Local(client) => Some(client.clone()),
+            Self::Remote { .. } => None,
+        }
+    }
     pub fn cwd(&self) -> Option<String> {
         match self {
             Self::Remote { cwd, .. } => cwd.clone(),

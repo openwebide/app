@@ -12,6 +12,31 @@ pub enum PluginOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ContextContribution {
+    pub prompt: Option<String>,
+    pub disabled_tools: Vec<String>,
+}
+
+/// Read-only context authority is checked by the runtime and the orchestration
+/// facade before forwarding a transport's host request.
+pub fn context_request_allowed(capability: &str, payload: &str) -> bool {
+    match capability {
+        "clock" => true,
+        "records" | "collections" => serde_json::from_str::<super::records::RecordRequest>(payload)
+            .is_ok_and(|request| {
+                request.validate().is_ok()
+                    && matches!(
+                        request.operation,
+                        super::records::RecordOperation::List { .. }
+                            | super::records::RecordOperation::Read { .. }
+                    )
+            }),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvokePlugin {
     #[serde(default)]
     pub operation: PluginOperation,

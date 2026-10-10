@@ -1,5 +1,7 @@
 //! Shared run planning and persisted event lifecycle. Hosts supply storage and transport primitives.
 mod chat;
+#[cfg(test)]
+mod plugin_context_tests;
 pub use chat::{ChatPersistence, chat_events};
 
 use crate::AgentEvent;
@@ -128,6 +130,103 @@ pub fn plan_with_plugins(
     Ok(plan_with_executables(runtime, input, plugins))
 }
 
+/// Execute read-only plugin planning hooks before model/tool selection. Hosts
+/// supply only authority, transport and callback primitives.
+pub async fn plan_with_plugin_context<T, S, A, F>(
+    runtime: &ModelRuntime,
+    mut input: PlanInput,
+    bindings: &[openwebide_core::plugins::ProjectPlugin],
+    transport: &T,
+    host: S,
+    authorize: A,
+) -> Result<openwebide_core::RunPlan, String>
+where
+    T: crate::plugins::execution::PluginTransport,
+    S: crate::plugins::execution::GrantedHost,
+    A: FnOnce(Vec<openwebide_core::plugins::PreparedPlugin>) -> F,
+    F: Future<Output = Result<std::collections::BTreeMap<String, String>, String>>,
+{
+    use crate::plugins::execution::{GrantedServices, invoke_plugin};
+    use openwebide_core::plugins::execution::{ContextContribution, InvokePlugin, PluginOperation};
+    let plugins = crate::plugins::execution::configure_tools(&mut input.tools, bindings)?;
+    if plugins.is_empty() {
+        return Ok(plan_with_executables(runtime, input, plugins));
+    }
+    let grants = authorize(plugins.clone()).await?;
+    if plugins
+        .iter()
+        .any(|plugin| grants.get(&plugin.digest).is_none_or(String::is_empty))
+    {
+        return Err("Plugin planning authority is unavailable".into());
+    }
+    let services = GrantedServices {
+        host,
+        grants: std::sync::Arc::new(grants.clone()),
+    };
+    let mut budget = runtime
+        .settings
+        .context_limit
+        .unwrap_or(32768)
+        .saturating_mul(3)
+        / 10;
+    budget = budget.min(8192);
+    for plugin in &plugins {
+        let outcome = invoke_plugin(
+            transport,
+            &services,
+            InvokePlugin {
+                operation: PluginOperation::Context,
+                prepared: plugin.clone(),
+                name: String::new(),
+                arguments: serde_json::json!({"budget_bytes":budget.saturating_sub(2)}).to_string(),
+            },
+        )
+        .await
+        .map_err(|error| format!("{} context failed: {error}", plugin.manifest.display_name))?;
+        if !outcome.ok {
+            return Err(format!(
+                "{} context failed: {}",
+                plugin.manifest.display_name, outcome.summary
+            ));
+        }
+        let contribution: ContextContribution =
+            serde_json::from_str(&outcome.content).map_err(|error| error.to_string())?;
+        let mut disabled = std::collections::BTreeSet::new();
+        if contribution.disabled_tools.iter().any(|name| {
+            !disabled.insert(name)
+                || !plugin
+                    .manifest
+                    .contributions
+                    .tools
+                    .iter()
+                    .any(|tool| tool.name == *name)
+        }) {
+            return Err("Plugin context can disable only its own tools".into());
+        }
+        input.tools.retain(|tool| !disabled.contains(&tool.name));
+        if let Some(prompt) = contribution.prompt.filter(|prompt| !prompt.is_empty()) {
+            if prompt.len().saturating_add(2) > budget {
+                return Err("Plugin context exceeds its budget".into());
+            }
+            budget -= prompt.len() + 2;
+            input
+                .system_prompt
+                .get_or_insert_with(String::new)
+                .push_str(&format!("\n\n{prompt}"));
+        }
+    }
+    let mut plan = plan_with_executables(runtime, input, plugins);
+    plan.plugin_grants = grants
+        .into_iter()
+        .filter(|(digest, _)| {
+            plan.plugin_executables
+                .iter()
+                .any(|plugin| plugin.digest == *digest)
+        })
+        .collect();
+    Ok(plan)
+}
+
 fn plan_with_executables(
     runtime: &ModelRuntime,
     input: PlanInput,
@@ -141,6 +240,7 @@ fn plan_with_executables(
             .into_iter()
             .filter(|tool| {
                 is_projectless_tool(&tool.name)
+                    || crate::host_admin::is_host_tool(&tool.name)
                     || crate::scheduled::is_scheduled_tool(&tool.name)
                     || plugins.iter().any(|plugin| {
                         plugin

@@ -28,14 +28,8 @@ pub trait HostServices: Send {
 struct ReadOnly<H>(H);
 impl<H: HostServices> HostServices for ReadOnly<H> {
     fn request(&mut self, capability: &str, payload: &str) -> Result<String, String> {
-        let read = match capability {
-            "clock" => true,
-            "records" | "collections" => serde_json::from_str::<serde_json::Value>(payload)
-                .ok()
-                .and_then(|value| value["operation"]["action"].as_str().map(str::to_owned))
-                .is_some_and(|action| matches!(action.as_str(), "list" | "read")),
-            _ => false,
-        };
+        let read =
+            openwebide_core::plugins::execution::context_request_allowed(capability, payload);
         if !read {
             return Err("Plugin context hooks cannot mutate host state".into());
         }

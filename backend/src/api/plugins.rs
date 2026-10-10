@@ -2,6 +2,113 @@
 use super::*;
 use openwebide_core::plugins::{PluginSource, PreparedPlugin, RecordPlugin};
 
+/// Spin HTTP/storage primitives for the shared plugin planning workflow.
+#[derive(Clone)]
+pub(crate) struct PlanningHost<'a> {
+    store: HostStore<'a>,
+    user: openwebide_core::UserId,
+    session: i64,
+    cancelled: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+#[derive(Clone)]
+enum HostStore<'a> {
+    Borrowed(&'a openwebide_storage::Store<crate::state::AppDb>),
+    Owned(std::sync::Arc<openwebide_storage::Store<crate::state::AppDb>>),
+}
+impl<'a> PlanningHost<'a> {
+    pub fn new(state: &'a AppState, user: openwebide_core::UserId, session: i64) -> Self {
+        Self {
+            store: HostStore::Borrowed(&state.store),
+            user,
+            session,
+            cancelled: Default::default(),
+        }
+    }
+    fn store(&self) -> &openwebide_storage::Store<crate::state::AppDb> {
+        match &self.store {
+            HostStore::Borrowed(store) => store,
+            HostStore::Owned(store) => store,
+        }
+    }
+    async fn send<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        mut body: serde_json::Value,
+    ) -> Result<T, String> {
+        body["user"] = json!(self.user.get());
+        let (status, response) = crate::bridge::send(self.store(), path, body.to_string())
+            .await
+            .map_err(|error| {
+                let error = ApiError::from(error);
+                error.log_for_route("POST", path);
+                error.public_message().to_owned()
+            })?;
+        if status != 200 {
+            return Err("Plugin execution host request failed".into());
+        }
+        serde_json::from_slice(&response)
+            .map_err(|_| "Plugin execution host returned an invalid response".into())
+    }
+    pub async fn flush_cancelled(&self) {
+        let ids = std::mem::take(&mut *self.cancelled.lock().unwrap());
+        for id in ids {
+            let _ = self
+                .send::<serde_json::Value>("/plugins/cancel", json!({"id":id}))
+                .await;
+        }
+    }
+}
+impl PlanningHost<'static> {
+    pub fn owned(
+        store: std::sync::Arc<openwebide_storage::Store<crate::state::AppDb>>,
+        user: openwebide_core::UserId,
+        session: i64,
+    ) -> Self {
+        Self {
+            store: HostStore::Owned(store),
+            user,
+            session,
+            cancelled: Default::default(),
+        }
+    }
+}
+impl openwebide_agent::plugins::execution::PluginTransport for PlanningHost<'_> {
+    async fn start(
+        &self,
+        call: openwebide_core::plugins::execution::InvokePlugin,
+    ) -> Result<openwebide_core::plugins::execution::PluginInvocation, String> {
+        self.send("/plugins/invoke", json!({"call":call})).await
+    }
+    async fn resume(
+        &self,
+        response: openwebide_core::plugins::execution::ContinuePlugin,
+    ) -> Result<openwebide_core::plugins::execution::PluginInvocation, String> {
+        self.send("/plugins/continue", json!({"continuation":response}))
+            .await
+    }
+    fn cancel(&self, id: String) {
+        self.cancelled.lock().unwrap().push(id);
+    }
+    async fn flush_cancellations(&self) {
+        self.flush_cancelled().await;
+    }
+}
+impl openwebide_agent::plugins::execution::GrantedHost for PlanningHost<'_> {
+    async fn request(
+        &self,
+        request: &openwebide_core::plugins::execution::PluginHostRequest,
+    ) -> Result<String, String> {
+        self.store()
+            .plugin_host_request(self.user, self.session, request, now())
+            .await
+            .map_err(|error| {
+                let error = ApiError::from(error);
+                error.log_for_route("POST", "/api/sessions/plugin-host");
+                error.public_message().to_owned()
+            })
+    }
+}
+
 pub(crate) async fn execution_grants(
     state: &AppState,
     user: openwebide_core::UserId,

@@ -965,14 +965,29 @@ pub async fn run_local_agent(
             context_limit: runtime.settings.context_limit,
         },
     );
-    let mut plan = openwebide_agent::session::plan_with_plugins(&runtime, input, &plugin_bindings)?;
+    let planning_api = api.with_value(Clone::clone);
+    let plugin_transport = BrowserPluginTransport(
+        host.as_ref()
+            .and_then(crate::project_host::ProjectExecution::local_bridge),
+    );
+    let plan = openwebide_agent::session::plan_with_plugin_context(
+        &runtime,
+        input,
+        &plugin_bindings,
+        &plugin_transport,
+        BrowserPluginServices {
+            api: SendWrapper::new(api),
+            session: session_id,
+        },
+        |plugins| async move {
+            planning_api
+                .plugin_execution_grants(session_id, &plugins)
+                .await
+        },
+    )
+    .await?;
+    let mut plan = plan;
     plan.plugin_skills = openwebide_agent::skills::package_snapshot(&skills);
-    if !plan.plugin_executables.is_empty() {
-        plan.plugin_grants = api
-            .with_value(Clone::clone)
-            .plugin_execution_grants(session_id, &plan.plugin_executables)
-            .await?;
-    }
     if !current() {
         return Err("Project access changed".into());
     }
@@ -1084,10 +1099,9 @@ pub async fn run_local_agent(
             first_turn,
             ..AgentConfig::default()
         };
-        let bridge = host.and_then(|host| match host {
-            crate::project_host::ProjectExecution::Local(bridge) => Some(bridge),
-            crate::project_host::ProjectExecution::Remote { .. } => None,
-        });
+        let bridge = host
+            .as_ref()
+            .and_then(crate::project_host::ProjectExecution::local_bridge);
         let factory = BrowserTaskFactory {
             plugin_skills: Arc::new(plan.plugin_skills),
             plugin_executables: Arc::new(plan.plugin_executables),

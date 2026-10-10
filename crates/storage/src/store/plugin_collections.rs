@@ -45,11 +45,21 @@ impl<D: Db> Store<D> {
                 "Unknown project collection".into(),
             ));
         }
-        let project = self
-            .get_session(session, user)
-            .await?
-            .project_id
-            .ok_or_else(|| StorageError::InvalidRequest("Collection requires a project".into()))?;
+        let Some(project) = self.get_session(session, user).await?.project_id else {
+            if matches!(
+                request.operation,
+                RecordOperation::List { .. } | RecordOperation::Read { .. }
+            ) {
+                return Ok(CollectionResult {
+                    enabled: false,
+                    records: Vec::new(),
+                    next: None,
+                });
+            }
+            return Err(StorageError::InvalidRequest(
+                "Collection requires a project".into(),
+            ));
+        };
         self.get_project(project, user).await?;
         let enabled = self
             .get_user_setting(user, &format!("project_memory_{project}"))
