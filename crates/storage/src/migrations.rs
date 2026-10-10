@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 54;
+pub const SCHEMA_VERSION: i64 = 55;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -638,6 +638,26 @@ async fn apply_step<D: Db>(
                 if db.execute(&format!("SELECT 1 FROM pragma_table_info('scheduled_tasks') WHERE name='{column}'"), &[]).await?.rows.is_empty() {
                     db.execute(sql,&[]).await?;
                 }
+            }
+            Ok(())
+        }
+        55 => {
+            db.execute("CREATE TABLE IF NOT EXISTS plugin_task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE, history_key TEXT NOT NULL, due_at INTEGER NOT NULL, run_id INTEGER, linked_run INTEGER REFERENCES plugin_runs(id) ON DELETE SET NULL, revision INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL, message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL, permission_id TEXT, UNIQUE(task_id,history_key))",&[]).await?;
+            // This is a data reference projection, not task dispatch or recurrence policy.
+            // Preserve the last raw status before its history entry is deleted.
+            for (name, event, reference) in [
+                (
+                    "project_plugin_task_run",
+                    "AFTER UPDATE OF state,detail,session_id,message_id,permission_id ON plugin_runs",
+                    "NEW",
+                ),
+                (
+                    "snapshot_deleted_plugin_task_run",
+                    "BEFORE DELETE ON plugin_runs",
+                    "OLD",
+                ),
+            ] {
+                db.execute(&format!("CREATE TRIGGER IF NOT EXISTS {name} {event} BEGIN UPDATE plugin_task_runs SET revision=revision+1,status=CASE {reference}.state WHEN 'pending' THEN 'queued' WHEN 'leased' THEN 'claimed' WHEN 'completed' THEN 'complete' ELSE {reference}.state END,detail={reference}.detail,session_id={reference}.session_id,message_id={reference}.message_id,permission_id={reference}.permission_id WHERE linked_run={reference}.id; END"),&[]).await?;
             }
             Ok(())
         }

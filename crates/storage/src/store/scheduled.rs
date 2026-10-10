@@ -42,7 +42,7 @@ impl<D: Db> Store<D> {
                     &[DbValue::Text(host_id.clone())],
                 )
                 .await?;
-            let history = self.db.execute("SELECT id, task_id, due_at, status, detail, message_id, permission_id, session_id FROM scheduled_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1", &[DbValue::Int(id)]).await?;
+            let history = self.db.execute("SELECT * FROM (SELECT id,task_id,due_at,status,detail,message_id,permission_id,session_id FROM scheduled_runs WHERE task_id=? UNION ALL SELECT id+4503599627370496,task_id,due_at,status,detail,message_id,permission_id,session_id FROM plugin_task_runs WHERE task_id=?) ORDER BY id DESC LIMIT 1", &[DbValue::Int(id),DbValue::Int(id)]).await?;
             tasks.push(ScheduledTask {
                 id,
                 revision: row.get_int(1)?,

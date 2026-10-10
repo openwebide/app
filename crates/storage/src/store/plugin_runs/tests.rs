@@ -2357,3 +2357,491 @@ fn configuration_metadata_is_read_only_account_scoped_current_and_credential_fre
         }
     });
 }
+
+#[test]
+fn task_history_projects_progress_preserves_legacy_ids_and_survives_raw_history_removal() {
+    use openwebide_core::plugins::records::CollectionResult;
+    use openwebide_core::scheduled::*;
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            f.bind_host(mode).await;
+            let draft = TaskDraft {
+                session_target: SessionTarget::Existing,
+                session_id: f.session,
+                title: "Task".into(),
+                prompt: "Check".into(),
+                auto_title: false,
+                model: None,
+                schedule: Schedule::Once { at: 100 },
+                enabled: true,
+            };
+            let task = f
+                .store
+                .scheduled_session_command(
+                    f.user,
+                    f.session,
+                    &TaskCommand::Create {
+                        draft: draft.clone(),
+                    },
+                    1,
+                )
+                .await
+                .unwrap()
+                .remove(0);
+            let legacy=f.store.db.execute("INSERT INTO scheduled_runs(task_id,due_at,status,detail) VALUES(?,10,'complete','Original history')",&[DbValue::Int(task.id)]).await.unwrap().last_insert_rowid;
+            let request = |collection: &str, operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":collection,"operation":operation}).to_string(),
+            };
+            f.store.plugin_host_request(f.user,f.session,&request("tasks",json!({"action":"update","id":task.id,"revision":task.revision,"value":{"draft":draft,"next_run":100,"state":{}}})),2).await.unwrap();
+            let raw = f
+                .request(&Fixture::submission("task:1:1:100"))
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            let create = request(
+                "task_runs",
+                json!({"action":"create","value":{"key":"first","task_id":task.id,"due_at":100,"run_id":raw.id}}),
+            );
+            let history: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &create, 2)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let id = history.records[0].id;
+            assert!(id > 1_i64 << 52);
+            assert_eq!(history.records[0].value["snapshot"]["status"], "queued");
+            let visible = f
+                .store
+                .scheduled_tasks(f.user, Some(f.project), 2)
+                .await
+                .unwrap();
+            assert_eq!(visible[0].last_run.as_ref().unwrap().id, id);
+            assert_eq!(
+                visible[0].last_run.as_ref().unwrap().session_id,
+                Some(f.session)
+            );
+            assert_eq!(visible[0].last_run.as_ref().unwrap().status, "queued");
+            let repeated: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &create, 3)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(history, repeated);
+            let read = request("task_runs", json!({"action":"read","id":id}));
+            f.store.db.execute("UPDATE plugin_runs SET state='blocked',detail='Waiting for approval',permission_id='approval' WHERE id=?",&[DbValue::Int(raw.id)]).await.unwrap();
+            let blocked: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &read, 3)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(blocked.records[0].revision > history.records[0].revision);
+            assert_eq!(blocked.records[0].value["snapshot"]["status"], "blocked");
+            assert_eq!(
+                f.store
+                    .scheduled_tasks(f.user, Some(f.project), 3)
+                    .await
+                    .unwrap()[0]
+                    .last_run
+                    .as_ref()
+                    .unwrap()
+                    .permission_id,
+                Some("approval".into())
+            );
+            assert!(f.store.plugin_host_request(f.user,f.session,&request("task_runs",json!({"action":"delete","id":id,"revision":blocked.records[0].revision})),3).await.is_err());
+            // SDK cancellation updates the projection without any Scheduling feature call.
+            let current = f
+                .request(&RunRequest::Read { id: raw.id })
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            let cancelled = f
+                .request(&RunRequest::Cancel {
+                    id: raw.id,
+                    revision: current.revision,
+                })
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            assert_eq!(cancelled.state, RunState::Cancelled);
+            let terminal: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &read, 3)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(terminal.records[0].value["snapshot"]["status"], "cancelled");
+            f.request(&RunRequest::Delete {
+                id: raw.id,
+                revision: cancelled.revision,
+            })
+            .await
+            .unwrap();
+            let retained: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &create, 3)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(retained.records[0].id, id);
+            assert_eq!(retained.records[0].value["snapshot"]["status"], "cancelled");
+            assert_eq!(retained.records[0].value["run_id"], raw.id);
+            assert_eq!(
+                f.store
+                    .scheduled_tasks(f.user, Some(f.project), 3)
+                    .await
+                    .unwrap()[0]
+                    .last_run
+                    .as_ref()
+                    .unwrap()
+                    .id,
+                id
+            );
+            let old: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("task_runs", json!({"action":"read","id":legacy})),
+                        3,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(old.records[0].id, legacy);
+            assert_eq!(
+                old.records[0].value["snapshot"]["detail"],
+                "Original history"
+            );
+            assert_eq!(old.records[0].value["editable"], false);
+            assert!(f.store.plugin_host_request(f.user,f.session,&request("task_runs",json!({"action":"delete","id":id,"revision":history.records[0].revision})),3).await.is_err());
+            f.store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &request(
+                        "task_runs",
+                        json!({"action":"delete","id":id,"revision":retained.records[0].revision}),
+                    ),
+                    3,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                f.store
+                    .scheduled_tasks(f.user, Some(f.project), 3)
+                    .await
+                    .unwrap()[0]
+                    .last_run
+                    .as_ref()
+                    .unwrap()
+                    .id,
+                legacy
+            );
+        }
+    });
+}
+
+#[test]
+fn task_history_requires_owned_tasks_scoped_snapshots_and_immutable_keys() {
+    use openwebide_core::plugins::records::CollectionResult;
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let request = |collection: &str, operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":collection,"operation":operation}).to_string(),
+            };
+            let value = json!({"draft":{"title":"Task","prompt":"Check","session_target":"existing","session_id":f.session,"schedule":{"kind":"once","at":100},"enabled":true},"next_run":100,"state":{}});
+            let created: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("tasks", json!({"action":"create","value":value})),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let task = created.records[0].id;
+            let mut snapshot = json!({"status":"failed","detail":"Source-owned preflight failure","session_id":f.session});
+            let operation = |key: &str, task_id: i64, snapshot: serde_json::Value| json!({"action":"create","value":{"key":key,"task_id":task_id,"due_at":100,"snapshot":snapshot}});
+            let created: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("task_runs", operation("failure", task, snapshot.clone())),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                created.records[0].value["snapshot"]["detail"],
+                "Source-owned preflight failure"
+            );
+            let foreign = f
+                .store
+                .create_session("Foreign", None, None, None, f.other, 0)
+                .await
+                .unwrap()
+                .id;
+            snapshot["session_id"] = json!(foreign);
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("task_runs", operation("foreign", task, snapshot.clone())),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            snapshot["session_id"] = json!(f.session);
+            snapshot["status"] = json!("running");
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(
+                            "task_runs",
+                            operation("fake-running", task, snapshot.clone())
+                        ),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            snapshot["status"] = json!("complete");
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(
+                            "task_runs",
+                            operation("missing-task", task + 1, snapshot.clone())
+                        ),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            let mut wrong = operation("failure", task, snapshot.clone());
+            wrong["value"]["due_at"] = json!(101);
+            assert!(
+                f.store
+                    .plugin_host_request(f.user, f.session, &request("task_runs", wrong), 2)
+                    .await
+                    .is_err()
+            );
+            let id = created.records[0].id;
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.other,
+                        f.session,
+                        &request("task_runs", json!({"action":"read","id":id})),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(
+                            "task_runs",
+                            json!({"action":"update","id":id,"revision":1,"value":{}})
+                        ),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            f.store
+                .db
+                .execute(
+                    "UPDATE scheduled_tasks SET plugin_owner='different' WHERE id=?",
+                    &[DbValue::Int(task)],
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("task_runs", json!({"action":"read","id":id})),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
+fn task_history_replay_and_deleted_run_fallback_preserve_snapshots_and_foreign_links_fail() {
+    use openwebide_core::plugins::records::CollectionResult;
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let request = |collection: &str, operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":collection,"operation":operation}).to_string(),
+            };
+            let value = json!({"draft":{"title":"Task","prompt":"Check","session_target":"existing","session_id":f.session,"schedule":{"kind":"once","at":100},"enabled":true},"next_run":100,"state":{}});
+            let created: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("tasks", json!({"action":"create","value":value})),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let task = created.records[0].id;
+            let raw = f
+                .request(&Fixture::submission("fallback"))
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            let operation = json!({"action":"create","value":{"key":"fallback","task_id":task,"due_at":100,"run_id":raw.id,"snapshot":{"status":"cancelled","detail":"Retained event result","session_id":f.session}}});
+            f.store
+                .db
+                .execute(
+                    "UPDATE plugin_runs SET project_scope=0 WHERE id=?",
+                    &[DbValue::Int(raw.id)],
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("task_runs", operation.clone()),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            f.store
+                .db
+                .execute(
+                    "UPDATE plugin_runs SET project_scope=? WHERE id=?",
+                    &[DbValue::Int(f.project), DbValue::Int(raw.id)],
+                )
+                .await
+                .unwrap();
+            let cancelled = f
+                .request(&RunRequest::Cancel {
+                    id: raw.id,
+                    revision: raw.revision,
+                })
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            f.request(&RunRequest::Delete {
+                id: raw.id,
+                revision: cancelled.revision,
+            })
+            .await
+            .unwrap();
+            let created: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("task_runs", operation.clone()),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                created.records[0].value["snapshot"]["detail"],
+                "Retained event result"
+            );
+            f.store
+                .db
+                .execute("PRAGMA user_version=54", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            let repeated: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &request("task_runs", operation), 2)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(created, repeated);
+            let live = f
+                .request(&Fixture::submission("linked-after-replay"))
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            let linked:CollectionResult=serde_json::from_str(&f.store.plugin_host_request(f.user,f.session,&request("task_runs",json!({"action":"create","value":{"key":"live","task_id":task,"due_at":100,"run_id":live.id}})),2).await.unwrap()).unwrap();
+            let cancelled = f
+                .request(&RunRequest::Cancel {
+                    id: live.id,
+                    revision: live.revision,
+                })
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            let read: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(
+                            "task_runs",
+                            json!({"action":"read","id":linked.records[0].id}),
+                        ),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(read.records[0].value["snapshot"]["status"], "cancelled");
+            assert_eq!(cancelled.state, RunState::Cancelled);
+        }
+    });
+}

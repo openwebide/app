@@ -402,8 +402,9 @@ capability.
   model pins and atomic terminal callbacks share the same queue, version pinning,
   renewable leases and scoped callback authority. Task collection CRUD preserves
   existing IDs/history and excludes plugin-owned records from legacy dispatch;
-  record prerequisites atomically reject stale new prompt submissions. Finish
-  source-owned task/monitor lifecycle recovery, history/UI integration, retention
+  record prerequisites atomically reject stale new prompt submissions. Scoped history
+  bindings project raw-run progress and retain terminal snapshots after cleanup. Finish
+  source-owned task/monitor lifecycle recovery, UI mutation integration, retention
   and cancellation failure handling,
   then activate the executable release. Route remaining UI and
   background invocations through the sessionless execution-context API; Memory

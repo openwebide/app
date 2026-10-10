@@ -197,6 +197,13 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
         let queued: Value = serde_json::from_str(&queued.content).unwrap();
         let run = &queued["runs"][0];
         assert_eq!(run["session_id"], session);
+        let progress = block_on(store.scheduled_tasks(user, Some(project), 105)).unwrap();
+        let history_id = progress[0].last_run.as_ref().unwrap().id;
+        assert_eq!(progress[0].last_run.as_ref().unwrap().status, "queued");
+        assert_eq!(
+            progress[0].last_run.as_ref().unwrap().session_id,
+            Some(session)
+        );
         assert_eq!(
             block_on(store.list_queued_prompts(user, session))
                 .unwrap()
@@ -204,12 +211,17 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
             1
         );
         let mut cancellation = services.clone();
-        cancellation
+        let cancelled = cancellation
             .request(
                 "runs",
                 &json!({"action":"cancel","id":run["id"],"revision":run["revision"]}).to_string(),
             )
             .unwrap();
+        let cancelled: Value = serde_json::from_str(&cancelled).unwrap();
+        cancellation.request("runs",&json!({"action":"delete","id":run["id"],"revision":cancelled["runs"][0]["revision"]}).to_string()).unwrap();
+        let retained = block_on(store.scheduled_tasks(user, Some(project), 105)).unwrap();
+        assert_eq!(retained[0].last_run.as_ref().unwrap().id, history_id);
+        assert_eq!(retained[0].last_run.as_ref().unwrap().status, "cancelled");
         let callback = block_on(store.claim_plugin_jobs("host", 0, &"d".repeat(32), 105))
             .unwrap()
             .jobs
@@ -239,6 +251,14 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
             )
             .unwrap();
         assert!(result.ok, "{}", result.content);
+        assert_eq!(
+            block_on(store.scheduled_tasks(user, Some(project), 105)).unwrap()[0]
+                .last_run
+                .as_ref()
+                .unwrap()
+                .id,
+            history_id
+        );
         let data: Value = serde_json::from_str(
             &services
                 .clone()

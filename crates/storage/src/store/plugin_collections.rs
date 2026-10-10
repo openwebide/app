@@ -66,6 +66,11 @@ impl<D: Db> Store<D> {
                 .plugin_tasks_in_transaction(user, plugin, context, request, now)
                 .await;
         }
+        if request.collection == "task_runs" {
+            return self
+                .plugin_task_history_in_transaction(user, plugin, context, request, now)
+                .await;
+        }
         let project = context.project_id;
         let user_action = context.user_action;
         if request.collection == "skills" {
