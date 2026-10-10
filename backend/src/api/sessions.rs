@@ -504,6 +504,19 @@ pub(super) async fn build_run_plan(
             context_limit: runtime.settings.context_limit,
         },
     );
+    let plugin_context = openwebide_core::plugins::execution::PluginExecutionContext {
+        project_id: session.project_id,
+        session_id: Some(session_id),
+        primary: runtime
+            .connection
+            .model
+            .as_ref()
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| openwebide_core::ModelSelection {
+                server_id: runtime.connection.id,
+                model: model.clone(),
+            }),
+    };
     let plugin_host = super::plugins::PlanningHost::new(state, user_id, session_id);
     let plan = openwebide_agent::session::plan_with_plugin_context(
         &runtime,
@@ -512,7 +525,7 @@ pub(super) async fn build_run_plan(
         &plugin_host,
         plugin_host.clone(),
         |plugins| async move {
-            super::plugins::execution_grants(state, user_id, session_id, &plugins)
+            super::plugins::context_grants(state, user_id, &plugin_context, &plugins)
                 .await
                 .map_err(|error| {
                     error.log_for_route("POST", "/api/sessions/run-plan");

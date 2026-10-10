@@ -1,7 +1,9 @@
 //! Durable authority snapshots for general host callbacks.
 use super::*;
 use openwebide_core::plugins::{
-    PreparedPlugin, default_bindings, execution::PluginHostRequest, records::RecordRequest,
+    PreparedPlugin, default_bindings,
+    execution::{PluginExecutionContext, PluginHostRequest},
+    records::RecordRequest,
 };
 
 type AuthorityFuture<'a> = std::pin::Pin<
@@ -12,10 +14,19 @@ type AuthorityFuture<'a> = std::pin::Pin<
             + 'a,
     >,
 >;
+type ContextAuthorityFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<(PreparedPlugin, PluginExecutionContext), StorageError>,
+            > + Send
+            + 'a,
+    >,
+>;
+type HostFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, StorageError>> + Send + 'a>>;
 
 impl<D: Db> Store<D> {
-    /// General external primitives use this same pinned authority check. Database
-    /// mutations call it inside their transaction; model I/O starts after it ends.
+    /// Chat callers and sessionless callers use the same pinned authority check.
     pub fn authorize_plugin_host<'a>(
         &'a self,
         user: UserId,
@@ -23,6 +34,34 @@ impl<D: Db> Store<D> {
         request: &'a PluginHostRequest,
         now: i64,
     ) -> AuthorityFuture<'a> {
+        Box::pin(async move {
+            self.db
+                .transaction(|tx| async move {
+                    let store = Store::new(tx);
+                    let (plugin, _) = store
+                        .plugin_authority_in_transaction(user, Some(session), request, now)
+                        .await?;
+                    Ok((plugin, store.get_session(session, user).await?))
+                })
+                .await
+        })
+    }
+    /// UI/background authority does not require a synthetic chat session.
+    pub fn authorize_plugin_context<'a>(
+        &'a self,
+        user: UserId,
+        request: &'a PluginHostRequest,
+        now: i64,
+    ) -> ContextAuthorityFuture<'a> {
+        self.authorize_plugin_execution(user, None, request, now)
+    }
+    pub fn authorize_plugin_execution<'a>(
+        &'a self,
+        user: UserId,
+        session: Option<i64>,
+        request: &'a PluginHostRequest,
+        now: i64,
+    ) -> ContextAuthorityFuture<'a> {
         Box::pin(async move {
             self.db
                 .transaction(|tx| async move {
@@ -36,23 +75,32 @@ impl<D: Db> Store<D> {
     async fn plugin_authority_in_transaction(
         &self,
         user: UserId,
-        session: i64,
+        session: Option<i64>,
         request: &PluginHostRequest,
         now: i64,
-    ) -> Result<(PreparedPlugin, openwebide_core::ChatSession), StorageError> {
-        let current = self.get_session(session, user).await?;
-        let grant = self.db.execute("SELECT prepared,project_scope FROM plugin_execution_grants WHERE token=? AND user_id=? AND session_id=? AND expires_at>?", &[
-            DbValue::Text(request.grant.clone()), DbValue::Int(user.get()), DbValue::Int(session), DbValue::Int(now),
+    ) -> Result<(PreparedPlugin, PluginExecutionContext), StorageError> {
+        let grant = self.db.execute("SELECT prepared,project_scope,session_id,primary_model FROM plugin_execution_grants WHERE token=? AND user_id=? AND expires_at>?", &[
+            DbValue::Text(request.grant.clone()), DbValue::Int(user.get()), DbValue::Int(now),
         ]).await?;
         let row = grant
             .rows
             .first()
             .ok_or_else(|| StorageError::NotFound("Plugin execution grant".into()))?;
-        if row.get_int(1)? != current.project_id.unwrap_or(0) {
-            return Err(StorageError::Conflict(
-                "Plugin execution project changed".into(),
-            ));
+        let grant_session = row.get_int_opt(2);
+        if session != grant_session {
+            return Err(StorageError::NotFound("Plugin execution grant".into()));
         }
+        let project = row.get_int(1)?;
+        let context = PluginExecutionContext {
+            project_id: (project != 0).then_some(project),
+            session_id: grant_session,
+            primary: row
+                .get_text_opt(3)
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| StorageError::Db(error.to_string()))?,
+        };
+        self.validate_plugin_context(user, &context).await?;
         let plugin: PreparedPlugin = serde_json::from_str(row.get_text(0)?)
             .map_err(|error| StorageError::Db(error.to_string()))?;
         if !plugin
@@ -65,14 +113,60 @@ impl<D: Db> Store<D> {
                 "Plugin capability is not granted".into(),
             ));
         }
-        Ok((plugin, current))
+        Ok((plugin, context))
     }
-    /// The API generates the opaque token. Only an enabled, installed receipt can
-    /// acquire authority; subsequent updates do not replace this run's snapshot.
+    async fn validate_plugin_context(
+        &self,
+        user: UserId,
+        context: &PluginExecutionContext,
+    ) -> Result<(), StorageError> {
+        if let Some(project) = context.project_id {
+            self.get_project(project, user).await?;
+        }
+        if let Some(session) = context.session_id
+            && self.get_session(session, user).await?.project_id != context.project_id
+        {
+            return Err(StorageError::Conflict(
+                "Plugin execution project changed".into(),
+            ));
+        }
+        if let Some(primary) = &context.primary
+            && (primary.model.trim().is_empty() || primary.model.len() > 1024)
+        {
+            return Err(StorageError::InvalidRequest(
+                "Invalid plugin model selection".into(),
+            ));
+        }
+        Ok(())
+    }
     pub async fn issue_plugin_grant(
         &self,
         user: UserId,
         session: i64,
+        plugin: &PreparedPlugin,
+        token: &str,
+        now: i64,
+    ) -> Result<(), StorageError> {
+        let project_id = self.get_session(session, user).await?.project_id;
+        self.issue_plugin_context_grant(
+            user,
+            &PluginExecutionContext {
+                project_id,
+                session_id: Some(session),
+                primary: None,
+            },
+            plugin,
+            token,
+            now,
+        )
+        .await
+    }
+    /// Only an enabled exact installed receipt can acquire authority. Subsequent
+    /// updates do not replace this invocation's source, project or model snapshot.
+    pub async fn issue_plugin_context_grant(
+        &self,
+        user: UserId,
+        context: &PluginExecutionContext,
         plugin: &PreparedPlugin,
         token: &str,
         now: i64,
@@ -87,8 +181,12 @@ impl<D: Db> Store<D> {
         }
         self.db.transaction(|tx| async move {
             let store = Store::new(tx);
-            let project = store.get_session(session, user).await?.project_id;
-            let bindings = match project {
+            store.validate_plugin_context(user, context).await?;
+            if let Some(primary) = &context.primary
+                && !store.get_connection(primary.server_id).await?.enabled {
+                return Err(StorageError::InvalidRequest("Plugin model server is disabled".into()));
+            }
+            let bindings = match context.project_id {
                 Some(project) => store.project_plugins(user, project).await?,
                 None => default_bindings(&store.plugin_installations(user).await?),
             };
@@ -100,49 +198,72 @@ impl<D: Db> Store<D> {
             }
             let expires = now.checked_add(86_400).ok_or_else(|| StorageError::InvalidRequest("Invalid grant expiry".into()))?;
             store.db.execute("DELETE FROM plugin_execution_grants WHERE expires_at<=?", &[DbValue::Int(now)]).await?;
-            store.db.execute("INSERT INTO plugin_execution_grants(token,user_id,session_id,project_scope,prepared,expires_at) VALUES(?,?,?,?,?,?)", &[
-                DbValue::Text(token.into()), DbValue::Int(user.get()), DbValue::Int(session), DbValue::Int(project.unwrap_or(0)),
+            store.db.execute("INSERT INTO plugin_execution_grants(token,user_id,session_id,project_scope,prepared,expires_at,primary_model) VALUES(?,?,?,?,?,?,?)", &[
+                DbValue::Text(token.into()), DbValue::Int(user.get()), context.session_id.map_or(DbValue::Null, DbValue::Int),
+                DbValue::Int(context.project_id.unwrap_or(0)),
                 DbValue::Text(serde_json::to_string(plugin).map_err(|error| StorageError::Db(error.to_string()))?), DbValue::Int(expires),
+                context.primary.as_ref().map(serde_json::to_string).transpose()
+                    .map_err(|error| StorageError::Db(error.to_string()))?.map_or(DbValue::Null, DbValue::Text),
             ]).await?;
             Ok(())
         }).await
     }
-    /// Authority and storage mutations share a transaction, preventing a session
-    /// reassignment between checking its original project and writing records.
     pub fn plugin_host_request<'a>(
         &'a self,
         user: UserId,
         session: i64,
         request: &'a PluginHostRequest,
         now: i64,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<String, StorageError>> + Send + 'a>,
-    > {
+    ) -> HostFuture<'a> {
+        self.plugin_scoped_host_request(user, Some(session), request, now)
+    }
+    pub fn plugin_context_host_request<'a>(
+        &'a self,
+        user: UserId,
+        request: &'a PluginHostRequest,
+        now: i64,
+    ) -> HostFuture<'a> {
+        self.plugin_scoped_host_request(user, None, request, now)
+    }
+    /// Authority and writes share a transaction, so scope cannot change mid-write.
+    fn plugin_scoped_host_request<'a>(
+        &'a self,
+        user: UserId,
+        session: Option<i64>,
+        request: &'a PluginHostRequest,
+        now: i64,
+    ) -> HostFuture<'a> {
         Box::pin(async move {
             self.db
                 .transaction(|tx| async move {
                     let store = Store::new(tx);
-                    let (plugin, _) = store
+                    let (plugin, context) = store
                         .plugin_authority_in_transaction(user, session, request, now)
                         .await?;
-                    let namespace = plugin.storage_namespace();
+                    let command: RecordRequest = serde_json::from_str(&request.payload)
+                        .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
                     match request.capability.as_str() {
                         "records" => {
-                            let command: RecordRequest = serde_json::from_str(&request.payload)
-                                .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
                             let result = store
-                                .plugin_records_in_transaction(
-                                    user, session, &namespace, &command, now,
+                                .plugin_project_records_in_transaction(
+                                    user,
+                                    context.project_id,
+                                    &plugin.storage_namespace(),
+                                    &command,
+                                    now,
                                 )
                                 .await?;
                             serde_json::to_string(&result)
                                 .map_err(|error| StorageError::Db(error.to_string()))
                         }
                         "collections" => {
-                            let command: RecordRequest = serde_json::from_str(&request.payload)
-                                .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
                             let result = store
-                                .plugin_collections_in_transaction(user, session, &command, now)
+                                .plugin_collections_in_transaction(
+                                    user,
+                                    context.project_id,
+                                    &command,
+                                    now,
+                                )
                                 .await?;
                             serde_json::to_string(&result)
                                 .map_err(|error| StorageError::Db(error.to_string()))
@@ -198,6 +319,282 @@ mod tests {
                 skills: Vec::new(),
             })),
         }
+    }
+    #[test]
+    fn context_migration_preserves_deployed_chat_grants_and_replays() {
+        block_on(async {
+            let store = Store::new(RusqliteDb::open_in_memory().unwrap());
+            crate::migrations::apply_through(&store.db, 47)
+                .await
+                .unwrap();
+            store
+                .db
+                .execute("PRAGMA user_version=47", &[])
+                .await
+                .unwrap();
+            let user = store
+                .insert_user("owner", "hash", UserRole::Admin, 0)
+                .await
+                .unwrap()
+                .id;
+            let session = store
+                .create_session("s", None, None, None, user, 0)
+                .await
+                .unwrap()
+                .id;
+            let plugin = receipt();
+            let token = "a".repeat(32);
+            store.db.execute("INSERT INTO plugin_execution_grants(token,user_id,session_id,project_scope,prepared,expires_at) VALUES(?,?,?,?,?,?)", &[
+                DbValue::Text(token.clone()), DbValue::Int(user.get()), DbValue::Int(session), DbValue::Int(0),
+                DbValue::Text(serde_json::to_string(&plugin).unwrap()), DbValue::Int(100),
+            ]).await.unwrap();
+            store.migrate().await.unwrap();
+            store.migrate().await.unwrap();
+            let request = PluginHostRequest {
+                grant: token,
+                capability: "records".into(),
+                payload: json!({"collection":"notes","operation":{"action":"list"}}).to_string(),
+            };
+            let (pinned, context) = store
+                .authorize_plugin_execution(user, Some(session), &request, 1)
+                .await
+                .unwrap();
+            assert_eq!(pinned, plugin);
+            assert_eq!(
+                context,
+                PluginExecutionContext {
+                    project_id: None,
+                    session_id: Some(session),
+                    primary: None
+                }
+            );
+            store
+                .plugin_host_request(user, session, &request, 1)
+                .await
+                .unwrap();
+            assert!(
+                store
+                    .plugin_context_host_request(user, &request, 1)
+                    .await
+                    .is_err()
+            );
+        });
+    }
+    #[test]
+    fn sessionless_contexts_share_project_data_and_preserve_pinned_authority_in_both_modes() {
+        block_on(async {
+            for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+                let store = Store::new(RusqliteDb::open_in_memory().unwrap());
+                store.migrate().await.unwrap();
+                let user = store
+                    .insert_user("owner", "hash", UserRole::Admin, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let other = store
+                    .insert_user("other", "hash", UserRole::User, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let project = store
+                    .create_project(
+                        &NewProject {
+                            name: "p".into(),
+                            mode,
+                            path: Some("p".into()),
+                        },
+                        user,
+                        0,
+                    )
+                    .await
+                    .unwrap()
+                    .id;
+                let session = store
+                    .create_session("s", None, None, Some(project), user, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let server = store
+                    .insert_connection(&openwebide_core::NewConnection {
+                        name: "Model".into(),
+                        kind: openwebide_core::ProviderKind::Ollama,
+                        base_url: "http://localhost:11434".into(),
+                        model: Some("default".into()),
+                        context_limit: None,
+                    })
+                    .await
+                    .unwrap();
+                let mut plugin = receipt();
+                plugin
+                    .manifest
+                    .executable
+                    .as_mut()
+                    .unwrap()
+                    .capabilities
+                    .push("collections".into());
+                store
+                    .record_plugin(user, &installation(&plugin, None), 1)
+                    .await
+                    .unwrap();
+                let context = PluginExecutionContext {
+                    project_id: Some(project),
+                    session_id: None,
+                    primary: Some(openwebide_core::ModelSelection {
+                        server_id: server.id,
+                        model: "selected".into(),
+                    }),
+                };
+                let token = "a".repeat(32);
+                store
+                    .issue_plugin_context_grant(user, &context, &plugin, &token, 2)
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .issue_plugin_context_grant(other, &context, &plugin, &"b".repeat(32), 2)
+                        .await
+                        .is_err()
+                );
+                let call = |capability: &str, value| PluginHostRequest {
+                    grant: token.clone(),
+                    capability: capability.into(),
+                    payload: value,
+                };
+                let private = call("records", json!({"collection":"notes","operation":{"action":"create","value":{"body":"UI event"}}}).to_string());
+                store
+                    .plugin_context_host_request(user, &private, 3)
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .plugin_context_host_request(other, &private, 3)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    store
+                        .plugin_host_request(user, session, &private, 3)
+                        .await
+                        .is_err()
+                );
+                let shared = call("collections", json!({"collection":"memories","operation":{"action":"create","value":{"title":"UI memory","content":"Event content"}}}).to_string());
+                store
+                    .plugin_context_host_request(user, &shared, 3)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .project_memories(user, project)
+                        .await
+                        .unwrap()
+                        .entries
+                        .len(),
+                    1
+                );
+                let (_, pinned) = store
+                    .authorize_plugin_context(user, &private, 3)
+                    .await
+                    .unwrap();
+                assert_eq!(pinned, context);
+                store
+                    .db
+                    .execute(
+                        "UPDATE connections SET enabled=0 WHERE id=?",
+                        &[DbValue::Int(server.id)],
+                    )
+                    .await
+                    .unwrap();
+                // Model unavailability cannot revoke unrelated granted storage.
+                store
+                    .plugin_context_host_request(user, &private, 3)
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .issue_plugin_context_grant(user, &context, &plugin, &"e".repeat(32), 3)
+                        .await
+                        .is_err()
+                );
+                store
+                    .db
+                    .execute(
+                        "UPDATE connections SET enabled=1 WHERE id=?",
+                        &[DbValue::Int(server.id)],
+                    )
+                    .await
+                    .unwrap();
+
+                // Replaying migrations must retain nullable scope and model snapshots.
+                store
+                    .db
+                    .execute("PRAGMA user_version=47", &[])
+                    .await
+                    .unwrap();
+                store.migrate().await.unwrap();
+                assert_eq!(
+                    store
+                        .authorize_plugin_context(user, &private, 3)
+                        .await
+                        .unwrap()
+                        .1,
+                    context
+                );
+                // Chat authority remains separate even when the project is identical.
+                let chat_token = "c".repeat(32);
+                store
+                    .issue_plugin_grant(user, session, &plugin, &chat_token, 3)
+                    .await
+                    .unwrap();
+                let chat = PluginHostRequest {
+                    grant: chat_token,
+                    ..private.clone()
+                };
+                assert!(
+                    store
+                        .plugin_context_host_request(user, &chat, 4)
+                        .await
+                        .is_err()
+                );
+                store
+                    .plugin_host_request(user, session, &chat, 4)
+                    .await
+                    .unwrap();
+                let saved = store.plugin_installations(user).await.unwrap().remove(0);
+                store
+                    .remove_plugin(
+                        user,
+                        &RemovePlugin {
+                            source: plugin.source.clone(),
+                            revision: saved.revision,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .issue_plugin_context_grant(user, &context, &plugin, &"d".repeat(32), 5)
+                        .await
+                        .is_err()
+                );
+                store
+                    .plugin_context_host_request(user, &private, 5)
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .plugin_context_host_request(user, &private, 86_402)
+                        .await
+                        .is_err()
+                );
+                store.delete_project(project, user).await.unwrap();
+                assert!(
+                    store
+                        .plugin_context_host_request(user, &private, 6)
+                        .await
+                        .is_err()
+                );
+            }
+        });
     }
     #[test]
     fn skill_collection_callbacks_preserve_ui_records_and_plugin_provenance_in_both_modes() {

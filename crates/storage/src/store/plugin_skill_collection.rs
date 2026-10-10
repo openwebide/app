@@ -14,11 +14,10 @@ impl<D: Db> Store<D> {
     pub(super) async fn plugin_skills_in_transaction(
         &self,
         user: UserId,
-        session: i64,
+        project: Option<i64>,
         request: &RecordRequest,
         now: i64,
     ) -> Result<CollectionResult, StorageError> {
-        let project = self.get_session(session, user).await?.project_id;
         let enabled = if let Some(project) = project {
             self.get_project(project, user).await?;
             self.get_user_setting(user, &format!("project_skills_{project}"))

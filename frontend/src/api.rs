@@ -1188,6 +1188,18 @@ impl BackendApi {
         self.post(&format!("/sessions/{session}/plugin-grants"), &plugins)
             .await
     }
+    pub async fn plugin_context_grants(
+        &self,
+        request: &openwebide_core::plugins::execution::PluginGrantRequest,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        self.post("/plugins/execution-grants", request).await
+    }
+    pub async fn plugin_context_host_request(
+        &self,
+        request: &openwebide_core::plugins::execution::PluginHostRequest,
+    ) -> Result<String, String> {
+        self.post("/plugins/host", request).await
+    }
     pub async fn plugin_host_request(
         &self,
         session: i64,

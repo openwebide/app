@@ -965,6 +965,19 @@ pub async fn run_local_agent(
             context_limit: runtime.settings.context_limit,
         },
     );
+    let plugin_context = openwebide_core::plugins::execution::PluginExecutionContext {
+        project_id: Some(project.id),
+        session_id: Some(session_id),
+        primary: runtime
+            .connection
+            .model
+            .as_ref()
+            .filter(|model| !model.trim().is_empty())
+            .map(|model| openwebide_core::ModelSelection {
+                server_id: runtime.connection.id,
+                model: model.clone(),
+            }),
+    };
     let planning_api = api.with_value(Clone::clone);
     let plugin_transport = BrowserPluginTransport(
         host.as_ref()
@@ -981,7 +994,10 @@ pub async fn run_local_agent(
         },
         |plugins| async move {
             planning_api
-                .plugin_execution_grants(session_id, &plugins)
+                .plugin_context_grants(&openwebide_core::plugins::execution::PluginGrantRequest {
+                    context: plugin_context,
+                    plugins,
+                })
                 .await
         },
     )

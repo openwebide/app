@@ -98,7 +98,7 @@ impl openwebide_agent::plugins::execution::GrantedHost for PlanningHost<'_> {
         &self,
         request: &openwebide_core::plugins::execution::PluginHostRequest,
     ) -> Result<String, String> {
-        execute_host_request(self.store(), self.user, self.session, request)
+        execute_host_request(self.store(), self.user, Some(self.session), request)
             .await
             .map_err(|error| {
                 error.log_for_route("POST", "/api/sessions/plugin-host");
@@ -110,56 +110,123 @@ impl openwebide_agent::plugins::execution::GrantedHost for PlanningHost<'_> {
 async fn execute_host_request(
     store: &openwebide_storage::Store<crate::state::AppDb>,
     user: UserId,
-    session: i64,
+    session: Option<i64>,
     request: &openwebide_core::plugins::execution::PluginHostRequest,
 ) -> Result<String, ApiError> {
     if request.capability == "completion" {
         let (_, context) = store
-            .authorize_plugin_host(user, session, request, now())
+            .authorize_plugin_execution(user, session, request, now())
             .await?;
         let input: openwebide_core::plugins::completion::CompletionRequest =
             serde_json::from_str(&request.payload)
                 .map_err(|error| ApiError::bad_request(error.to_string()))?;
         input.validate().map_err(ApiError::bad_request)?;
-        let connection = context
-            .connection_id
-            .ok_or_else(|| ApiError::bad_request("Session has no model connection"))?;
-        let runtime = super::model_setup::runtime_store(store, user, connection, None).await?;
+        let (connection, model) = if let Some(selection) = context.primary {
+            (selection.server_id, Some(selection.model))
+        } else if let Some(session) = context.session_id {
+            let connection = store
+                .get_session(session, user)
+                .await?
+                .connection_id
+                .ok_or_else(|| ApiError::bad_request("Session has no model connection"))?;
+            (connection, None)
+        } else {
+            return Err(ApiError::bad_request("No primary model is configured"));
+        };
+        let runtime =
+            super::model_setup::runtime_store(store, user, connection, model.as_deref()).await?;
         let source = super::model_operations::ModelSource { store, user };
         let result = openwebide_agent::plugins::completion::complete(&source, runtime, input)
             .await
             .map_err(ApiError::bad_request)?;
         serde_json::to_string(&result).map_err(|error| ApiError::internal(error.to_string()))
     } else {
-        store
-            .plugin_host_request(user, session, request, now())
-            .await
-            .map_err(Into::into)
+        match session {
+            Some(session) => {
+                store
+                    .plugin_host_request(user, session, request, now())
+                    .await
+            }
+            None => {
+                store
+                    .plugin_context_host_request(user, request, now())
+                    .await
+            }
+        }
+        .map_err(Into::into)
     }
 }
 
 pub(crate) async fn execution_grants(
     state: &AppState,
-    user: openwebide_core::UserId,
+    user: UserId,
     session: i64,
     plugins: &[PreparedPlugin],
 ) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
-    state.store.get_session(session, user).await?;
+    let current = state.store.get_session(session, user).await?;
+    context_grants(
+        state,
+        user,
+        &openwebide_core::plugins::execution::PluginExecutionContext {
+            project_id: current.project_id,
+            session_id: Some(session),
+            primary: None,
+        },
+        plugins,
+    )
+    .await
+}
+pub(crate) async fn context_grants(
+    state: &AppState,
+    user: UserId,
+    context: &openwebide_core::plugins::execution::PluginExecutionContext,
+    plugins: &[PreparedPlugin],
+) -> Result<std::collections::BTreeMap<String, String>, ApiError> {
     if plugins.len() > 64 {
         return Err(ApiError::bad_request("Too many executable plugins"));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    if plugins.iter().any(|plugin| !unique.insert(&plugin.digest)) {
+        return Err(ApiError::bad_request("Duplicate executable plugin"));
+    }
+    let mut context = context.clone();
+    if context.primary.is_none() && context.session_id.is_none() {
+        context.primary = state.store.model_setup(user).await?.defaults.primary;
     }
     let mut grants = std::collections::BTreeMap::new();
     for plugin in plugins {
         let token = format!("{:032x}", rand::random::<u128>());
         state
             .store
-            .issue_plugin_grant(user, session, plugin, &token, now())
+            .issue_plugin_context_grant(user, &context, plugin, &token, now())
             .await?;
-        if grants.insert(plugin.digest.clone(), token).is_some() {
-            return Err(ApiError::bad_request("Duplicate executable plugin"));
-        }
+        grants.insert(plugin.digest.clone(), token);
     }
     Ok(grants)
+}
+pub(crate) async fn grant_context(
+    req: Request,
+    state: &AppState,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    let input: openwebide_core::plugins::execution::PluginGrantRequest =
+        parse_json(read_body(req, 256 * 1024).await?)?;
+    Ok(json_response(
+        200,
+        &context_grants(state, user.id, &input.context, &input.plugins).await?,
+    ))
+}
+pub(crate) async fn context_host_request(
+    req: Request,
+    state: &AppState,
+    user: AuthedUser,
+) -> Result<JsonResp, ApiError> {
+    let input: openwebide_core::plugins::execution::PluginHostRequest =
+        parse_json(read_body(req, 4 * 1024 * 1024).await?)?;
+    Ok(json_response(
+        200,
+        &execute_host_request(&state.store, user.id, None, &input).await?,
+    ))
 }
 pub(crate) async fn grant_execution(
     req: Request,
@@ -193,7 +260,7 @@ pub(crate) async fn host_request(
         parse_json(read_body(req, 4 * 1024 * 1024).await?)?;
     Ok(json_response(
         200,
-        &execute_host_request(&state.store, user.id, session, &request).await?,
+        &execute_host_request(&state.store, user.id, Some(session), &request).await?,
     ))
 }
 

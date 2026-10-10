@@ -32,6 +32,18 @@ impl<D: Db> Store<D> {
         request: &RecordRequest,
         now: i64,
     ) -> Result<RecordResult, StorageError> {
+        let project = self.get_session(session, user).await?.project_id;
+        self.plugin_project_records_in_transaction(user, project, plugin, request, now)
+            .await
+    }
+    pub(super) async fn plugin_project_records_in_transaction(
+        &self,
+        user: UserId,
+        project: Option<i64>,
+        plugin: &str,
+        request: &RecordRequest,
+        now: i64,
+    ) -> Result<RecordResult, StorageError> {
         request.validate().map_err(StorageError::InvalidRequest)?;
         if plugin.is_empty()
             || plugin.len() > 128
@@ -44,11 +56,7 @@ impl<D: Db> Store<D> {
             ));
         }
         let store = self;
-        let project = store
-            .get_session(session, user)
-            .await?
-            .project_id
-            .unwrap_or(0);
+        let project = project.unwrap_or(0);
         if project != 0 {
             store.get_project(project, user).await?;
         }

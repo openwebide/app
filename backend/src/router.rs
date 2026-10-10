@@ -64,6 +64,8 @@ enum Route {
     SessionSkillCommand,
     PluginExecutionGrants,
     PluginHostRequest,
+    PluginContextGrants,
+    PluginContextHostRequest,
     ListProjects,
     ListPlugins,
     ListMarketplaces,
@@ -231,6 +233,8 @@ fn resolve(method: &str, segments: &[&str]) -> Option<Route> {
         ("POST", ["sessions", id, "plugin-grants"]) if numeric_id(id) => {
             Some(Route::PluginExecutionGrants)
         }
+        ("POST", ["plugins", "execution-grants"]) => Some(Route::PluginContextGrants),
+        ("POST", ["plugins", "host"]) => Some(Route::PluginContextHostRequest),
         ("POST", ["sessions", id, "plugin-host"]) if numeric_id(id) => {
             Some(Route::PluginHostRequest)
         }
@@ -492,6 +496,12 @@ pub async fn route(req: Request) -> JsonResp {
         }
         (Some(Route::PluginHostRequest), Some(user)) => {
             api::plugins::host_request(req, &state, &path, user).await
+        }
+        (Some(Route::PluginContextGrants), Some(user)) => {
+            api::plugins::grant_context(req, &state, user).await
+        }
+        (Some(Route::PluginContextHostRequest), Some(user)) => {
+            api::plugins::context_host_request(req, &state, user).await
         }
         (Some(Route::GetProjectSkills), Some(user)) => {
             api::skills::get(&state, &path, user, false).await
@@ -1003,6 +1013,8 @@ mod tests {
                 Route::PreparePlugin,
                 Route::PluginExecutionGrants,
                 Route::PluginHostRequest,
+                Route::PluginContextGrants,
+                Route::PluginContextHostRequest,
                 Route::GetProjectSkills,
                 Route::ProjectSkillCommand,
                 Route::GetSessionSkills,
@@ -1060,6 +1072,12 @@ mod tests {
                 Route::PluginExecutionGrants,
             ),
             ("POST", "sessions/5/plugin-host", Route::PluginHostRequest),
+            (
+                "POST",
+                "plugins/execution-grants",
+                Route::PluginContextGrants,
+            ),
+            ("POST", "plugins/host", Route::PluginContextHostRequest),
             ("GET", "projects/5/memories", Route::GetProjectMemories),
             ("POST", "projects/5/memories", Route::ProjectMemoryCommand),
             ("GET", "sessions/5/memories", Route::GetSessionMemories),

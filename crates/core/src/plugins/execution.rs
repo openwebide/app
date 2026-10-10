@@ -11,6 +11,22 @@ pub enum PluginOperation {
     Event,
 }
 
+/// Host-owned execution scope. This is never passed to the plugin or model.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginExecutionContext {
+    pub project_id: Option<i64>,
+    pub session_id: Option<i64>,
+    pub primary: Option<crate::ModelSelection>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginGrantRequest {
+    pub context: PluginExecutionContext,
+    pub plugins: Vec<PreparedPlugin>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventInput {

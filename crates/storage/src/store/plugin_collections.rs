@@ -35,7 +35,7 @@ impl<D: Db> Store<D> {
     pub(super) async fn plugin_collections_in_transaction(
         &self,
         user: UserId,
-        session: i64,
+        project: Option<i64>,
         request: &RecordRequest,
         now: i64,
     ) -> Result<CollectionResult, StorageError> {
@@ -51,7 +51,7 @@ impl<D: Db> Store<D> {
             .map_err(StorageError::InvalidRequest)?;
         if request.collection == "skills" {
             return self
-                .plugin_skills_in_transaction(user, session, request, now)
+                .plugin_skills_in_transaction(user, project, request, now)
                 .await;
         }
         if request.collection != "memories" {
@@ -59,7 +59,7 @@ impl<D: Db> Store<D> {
                 "Unknown project collection".into(),
             ));
         }
-        let Some(project) = self.get_session(session, user).await?.project_id else {
+        let Some(project) = project else {
             if matches!(
                 request.operation,
                 RecordOperation::List { .. } | RecordOperation::Read { .. }

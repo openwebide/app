@@ -81,7 +81,7 @@ fn completion_authority_is_checked_before_model_access_in_both_modes() {
                     json!({"system_prompt":"Plugin policy","prompt":"Fact","max_output_tokens":64})
                         .to_string(),
             };
-            let authorized = execute_host_request(&store, user, session, &request)
+            let authorized = execute_host_request(&store, user, Some(session), &request)
                 .await
                 .unwrap_err();
             assert_eq!(
@@ -89,7 +89,7 @@ fn completion_authority_is_checked_before_model_access_in_both_modes() {
                 "Session has no model connection"
             );
             assert!(
-                execute_host_request(&store, other, session, &request)
+                execute_host_request(&store, other, Some(session), &request)
                     .await
                     .unwrap_err()
                     .into_response()
@@ -97,10 +97,54 @@ fn completion_authority_is_checked_before_model_access_in_both_modes() {
                     .as_u16()
                     == 404
             );
+            let context_token = "d".repeat(32);
+            store
+                .issue_plugin_context_grant(
+                    user,
+                    &openwebide_core::plugins::execution::PluginExecutionContext {
+                        project_id: Some(project),
+                        session_id: None,
+                        primary: None,
+                    },
+                    &plugin,
+                    &context_token,
+                    now(),
+                )
+                .await
+                .unwrap();
+            let context_request = openwebide_core::plugins::execution::PluginHostRequest {
+                grant: context_token,
+                ..request.clone()
+            };
+            assert_eq!(
+                execute_host_request(&store, user, None, &context_request)
+                    .await
+                    .unwrap_err()
+                    .public_message(),
+                "No primary model is configured"
+            );
+            assert_eq!(
+                execute_host_request(&store, other, None, &context_request)
+                    .await
+                    .unwrap_err()
+                    .into_response()
+                    .status()
+                    .as_u16(),
+                404
+            );
+            assert_eq!(
+                execute_host_request(&store, user, Some(session), &context_request)
+                    .await
+                    .unwrap_err()
+                    .into_response()
+                    .status()
+                    .as_u16(),
+                404
+            );
             let mut invalid = request.clone();
             invalid.grant = "b".repeat(32);
             assert_eq!(
-                execute_host_request(&store, user, session, &invalid)
+                execute_host_request(&store, user, Some(session), &invalid)
                     .await
                     .unwrap_err()
                     .into_response()
@@ -111,7 +155,7 @@ fn completion_authority_is_checked_before_model_access_in_both_modes() {
             invalid = request.clone();
             invalid.capability = "collections".into();
             assert_eq!(
-                execute_host_request(&store, user, session, &invalid)
+                execute_host_request(&store, user, Some(session), &invalid)
                     .await
                     .unwrap_err()
                     .into_response()
@@ -123,11 +167,111 @@ fn completion_authority_is_checked_before_model_access_in_both_modes() {
             invalid.payload =
                 json!({"system_prompt":"x","prompt":"Fact","max_output_tokens":0}).to_string();
             assert!(
-                execute_host_request(&store, user, session, &invalid)
+                execute_host_request(&store, user, Some(session), &invalid)
                     .await
                     .unwrap_err()
                     .public_message()
                     .contains("1–1024")
+            );
+            let server = store
+                .insert_connection(&openwebide_core::NewConnection {
+                    name: "Model".into(),
+                    kind: openwebide_core::ProviderKind::Ollama,
+                    base_url: "http://localhost:11434".into(),
+                    model: Some("server-default".into()),
+                    context_limit: None,
+                })
+                .await
+                .unwrap();
+            let selected = |model: &str| openwebide_core::ModelSelection {
+                server_id: server.id,
+                model: model.into(),
+            };
+            store
+                .save_model_defaults(
+                    user,
+                    &openwebide_core::ModelDefaults {
+                        primary: Some(selected("account-default")),
+                        fast: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let state = AppState { store };
+            let context = openwebide_core::plugins::execution::PluginExecutionContext {
+                project_id: Some(project),
+                session_id: None,
+                primary: None,
+            };
+            let grants = context_grants(&state, user, &context, std::slice::from_ref(&plugin))
+                .await
+                .unwrap();
+            let pinned_request = openwebide_core::plugins::execution::PluginHostRequest {
+                grant: grants[&plugin.digest].clone(),
+                ..request.clone()
+            };
+            state
+                .store
+                .save_model_defaults(
+                    user,
+                    &openwebide_core::ModelDefaults {
+                        primary: Some(selected("changed-default")),
+                        fast: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                state
+                    .store
+                    .authorize_plugin_context(user, &pinned_request, now())
+                    .await
+                    .unwrap()
+                    .1
+                    .primary,
+                Some(selected("account-default"))
+            );
+            let run_context = openwebide_core::plugins::execution::PluginExecutionContext {
+                session_id: Some(session),
+                primary: Some(selected("run-override")),
+                ..context.clone()
+            };
+            let run_grants =
+                context_grants(&state, user, &run_context, std::slice::from_ref(&plugin))
+                    .await
+                    .unwrap();
+            let run_request = openwebide_core::plugins::execution::PluginHostRequest {
+                grant: run_grants[&plugin.digest].clone(),
+                ..request.clone()
+            };
+            assert_eq!(
+                state
+                    .store
+                    .authorize_plugin_execution(user, Some(session), &run_request, now())
+                    .await
+                    .unwrap()
+                    .1,
+                run_context
+            );
+            assert!(
+                state
+                    .store
+                    .get_session(session, user)
+                    .await
+                    .unwrap()
+                    .connection_id
+                    .is_none()
+            );
+            assert_eq!(state.store.list_sessions(user).await.unwrap().len(), 1);
+            assert!(
+                context_grants(&state, other, &context, std::slice::from_ref(&plugin))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                context_grants(&state, user, &context, &[plugin.clone(), plugin.clone()])
+                    .await
+                    .is_err()
             );
         }
     });

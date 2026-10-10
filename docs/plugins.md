@@ -154,6 +154,13 @@ use opaque run grants checked against the authenticated account, session, origin
 project and pinned plugin source/capabilities. Record collections persist across
 plugin updates and reinstalls, with revision checks, bounded pages and quotas.
 Grant tokens stay in host orchestration and are never passed to plugin code.
+Execution contexts can scope a grant to an owned project without a chat session.
+They use the same storage callbacks and retain the selected primary model where
+configured; chat planners pin their selected model, including run overrides.
+Context grants and chat grants cannot be used through each other's callback
+endpoint. Existing active grants retain their pinned plugin version across
+updates or removal; new grants require the currently enabled installed version.
+Sessionless UI action routing and durable background delivery remain unfinished.
 The separate `completion` grant exposes bounded text generation through the
 session's configured primary or fast model. Plugins supply prompts and interpret
 the results; the host supplies model selection and credentials. Inputs are limited

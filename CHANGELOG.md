@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add authenticated plugin execution contexts without chat sessions, sharing project records and collection callbacks with chat runs. Pin selected primary models in local and remote run grants; UI action routing and durable job delivery remain in progress.
+
 - Add declared Rust SDK event handlers through the shared host invocation workflow, with manifest/export matching, bounded payloads and normal capability grants. Durable scheduling and background delivery remain in progress.
 
 - Add capability-gated text completion through configured primary/fast models, with shared input/context/output limits, a 30-second deadline and no tools. Memory Rust source owns its automatic-title prompt, profile fallback and content-derived fallback; UI naming integration and deployment remain in progress.
