@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add transactional plugin-owned record storage with account/project/plugin namespaces, revision checks, bounded pages and quotas, plus an isolated Rust source authoring checker. Runtime persistence authorization and first-party migrations remain in progress.
+
 - Add Rust plugin SDK and isolated source-to-WASM preparation foundations, with a shared executable-tool workflow for server and paired hosts. General persistence/job capabilities, first-party behavior migration and offline executable defaults remain unfinished.
 
 - Retry transient Chrome/ChromeDriver setup failures up to three times in both frontend CI jobs, requiring executable browser and driver paths before testing.

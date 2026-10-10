@@ -1,6 +1,7 @@
 //! Host-only plugin preparation policy, shared by every bridge transport.
 pub mod execution;
 pub mod marketplace;
+pub mod records;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::LazyLock};
 
 use regex::Regex;

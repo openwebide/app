@@ -94,7 +94,9 @@ impl Runtime {
             },
         );
         store.limiter(|state| &mut state.limits);
-        store.set_fuel(10_000_000)?;
+        // Include JSON/base64 transfer and bounded HTML parsing, not just small
+        // fixture handlers. Fuel still bounds untrusted CPU work per invocation.
+        store.set_fuel(250_000_000)?;
         let plugin = Plugin::instantiate(&mut store, &component, &linker)?;
         Ok((store, plugin))
     }
@@ -225,6 +227,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.content, "{\"value\":42}");
+    }
+    #[test]
+    fn bounded_large_transfers_fit_the_invocation_fuel_budget() {
+        let runtime = Runtime::new().unwrap();
+        // "eHh4" decodes to "xxx"; exercise the full 2 MiB HTTP body limit.
+        let arguments = serde_json::json!({"encoded":"eHh4".repeat(699_050)}).to_string();
+        let outcome = runtime
+            .execute(&fixture(), Records, &[], "fixture_large_input", &arguments)
+            .unwrap();
+        assert!(outcome.ok);
+        assert_eq!(outcome.content, "x".repeat(16_384));
     }
     #[test]
     fn traps_and_exhausted_fuel_do_not_poison_subsequent_calls() {

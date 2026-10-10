@@ -153,8 +153,10 @@ progress. HTTP and clock primitives run on the bridge; authenticated persistence
 job and workspace callbacks, Linux installation verification and compiled offline
 defaults still need implementation. API 2 first-party plugins remain transitional.
 
-Prove the contract by moving Web's implementation into the plugins repository,
-then migrate Memory, Scheduling and Skill Authoring. Verify the same behavior in
+Web's source reference implementation now lives in the plugins repository and
+uses only the public SDK HTTP primitive. Its API 3 release remains unlisted while
+installation and migration verification continue. Next migrate Memory, Scheduling
+and Skill Authoring. Verify the same behavior in
 local and remote modes, including cancellation, crashes, disablement and updates,
 before calling those migrations complete. Completion of executable plugins, MCP
 servers, dependencies, language, UI and editor contributions remains on the roadmap.

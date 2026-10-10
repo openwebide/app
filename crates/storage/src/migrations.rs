@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 45;
+pub const SCHEMA_VERSION: i64 = 46;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -487,6 +487,12 @@ async fn apply_step<D: Db>(
         }
         45 => {
             db.execute("CREATE TABLE IF NOT EXISTS plugin_defaults (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, repository TEXT NOT NULL, path TEXT NOT NULL, package TEXT NOT NULL, PRIMARY KEY(user_id,repository,path))", &[]).await?;
+            Ok(())
+        }
+        46 => {
+            db.execute("CREATE TABLE IF NOT EXISTS plugin_records (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, plugin TEXT NOT NULL, collection TEXT NOT NULL, value TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL)", &[]).await?;
+            db.execute("CREATE INDEX IF NOT EXISTS plugin_records_scope ON plugin_records(user_id,project_scope,plugin,collection,id)", &[]).await?;
+            db.execute("CREATE TRIGGER IF NOT EXISTS delete_project_plugin_records AFTER DELETE ON projects BEGIN DELETE FROM plugin_records WHERE project_scope=OLD.id; END", &[]).await?;
             Ok(())
         }
         other => Err(StorageError::Db(format!("unknown migration step {other}"))),

@@ -37,6 +37,19 @@ pub fn http(request: &HttpRequest) -> Result<HttpResponse, String> {
     self::request("http", request)
 }
 
+/// General record CRUD. The host attaches user, project and plugin identity;
+/// callers cannot choose another account or namespace. Operation is an object
+/// with an `action` of list/read/create/update/delete and its arguments.
+pub fn records<T: Serialize, R: serde::de::DeserializeOwned>(
+    collection: &str,
+    operation: &T,
+) -> Result<R, String> {
+    request(
+        "records",
+        &serde_json::json!({"collection": collection, "operation": operation}),
+    )
+}
+
 /// The host independently validates names, schemas and requested capabilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

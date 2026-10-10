@@ -59,13 +59,15 @@ pub fn compile(source: &Path, output_name: &str, staging: &Path) -> Result<Vec<u
     );
     let common = ["--locked", "--manifest-path"];
     // Fetch performs no package build-script execution. Cargo config is read from
-    // this trusted staging cwd, not from the plugin's working directory.
+    // this trusted staging cwd, not from the plugin's working directory. Fetch
+    // the complete lockfile: filtering to the WASI target can omit native
+    // dependencies needed by proc macros and build scripts during cross builds.
     let mut fetch = command(&cargo, &rustc, &rustup_home, &cargo_home, &staging);
     fetch
         .arg("fetch")
         .args(common)
         .arg(source.join("Cargo.toml"))
-        .args(["--target", TARGET, "--config", &patch]);
+        .args(["--config", &patch]);
     run(fetch, Duration::from_secs(180)).context("Fetch Rust plugin dependencies")?;
     let mut build = sandbox(&cargo, &source, &staging, &rustup_home)?;
     configure(&mut build, &rustc, &rustup_home, &cargo_home, &staging);
