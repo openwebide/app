@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Prepare legacy skill tools and catalog context only for enabled API 2 authoring contributions, allowing SDK plugins to own all six skill handlers and context without tool collisions. The unlisted first-party Rust source now implements this behavior; deployment and default migration remain in progress.
+
 - Expose existing Skills UI records through capability-gated collection CRUD, preserving resources, metadata, revisions and plugin provenance. Protect managed and disabled skills and keep authoring policy in plugin code; the executable Skill Authoring migration remains in progress.
 
 - Run read-only Rust SDK context hooks through shared planning before model tool selection in local and remote sessions. Enforce prompt budgets, grant scope and disabling only the plugin's own tools, including when model tools are disabled.

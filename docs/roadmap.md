@@ -405,11 +405,10 @@ capability.
   before activation. Cache artifacts by source, SDK and toolchain. Publish the SDK
   distribution and source-authoring/custom-marketplace workflow, and verify the
   complete install/run/update lifecycle through both host adapters.
-- Complete installation and run verification of the plugin-owned Web and Memory
-  sources. Move model-assisted Memory naming into plugin code over a general
-  completion primitive. Replace transitional
-  Scheduling and Skill Authoring tool-group feature switches with plugin-owned
-  implementations.
+- Complete installation and run verification of the plugin-owned Web, Memory and
+  Skill Authoring sources. Move model-assisted Memory naming into plugin code over
+  a general completion primitive. Replace the transitional Scheduling tool-group
+  feature switch with a plugin-owned implementation and retire legacy dispatch.
   Require the same public SDK, interfaces and privileges as community plugins:
   no first-party identity dispatch, built-in feature proxy or fallback. Keep host
   primitives general and feature policy in plugin code. Verify local/remote

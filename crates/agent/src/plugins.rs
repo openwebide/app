@@ -32,7 +32,20 @@ pub fn configure(
         context.context_limit,
     );
     crate::scheduled::configure(tools);
-    crate::skills::configure(tools, prompt, context.skills, context.context_limit);
+    let disabled_skills = openwebide_core::ProjectSkills {
+        enabled: false,
+        entries: Vec::new(),
+    };
+    crate::skills::configure(
+        tools,
+        prompt,
+        if groups.contains(&PluginToolGroup::SkillAuthoring) {
+            context.skills
+        } else {
+            &disabled_skills
+        },
+        context.context_limit,
+    );
     tools.retain(|tool| match tool.name.as_str() {
         "search_web" | "fetch_web_page" => groups.contains(&PluginToolGroup::Web),
         "memory_create" | "memory_search" | "memory_read" | "memory_update" | "memory_delete" => {
@@ -41,7 +54,7 @@ pub fn configure(
         "monitor" | "schedule_list" | "schedule_create" | "schedule_update" | "schedule_delete" => {
             groups.contains(&PluginToolGroup::Scheduling)
         }
-        "skill_create" | "skill_update" | "skill_delete" => {
+        "skill_list" | "skill_read" | "skill_create" | "skill_update" | "skill_delete" => {
             groups.contains(&PluginToolGroup::SkillAuthoring)
         }
         // Authoring instructions now come from the plugin's discoverable skill.
@@ -53,6 +66,82 @@ pub fn configure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sdk_skill_handlers_replace_legacy_tools_without_builtin_catalog_policy() {
+        for mut tools in [crate::vfs_tools(), crate::session::tools_for_host(true)] {
+            let mut prepared = openwebide_core::plugins::testing::receipt();
+            prepared.manifest.compatibility.plugin_api = 3;
+            prepared.manifest.contributions.skills.clear();
+            prepared.manifest.contributions.tools = crate::skills::TOOL_NAMES
+                .iter()
+                .map(|name| {
+                    let definition = crate::skills::definition(name);
+                    openwebide_core::plugins::PluginTool {
+                        name: definition.name,
+                        description: definition.description,
+                        parameters: definition.parameters,
+                        requires_approval: matches!(
+                            *name,
+                            "skill_create" | "skill_update" | "skill_delete"
+                        ),
+                    }
+                })
+                .collect();
+            prepared.manifest.executable = Some(openwebide_core::plugins::RustPlugin {
+                manifest: "Cargo.toml".into(),
+                library: "community_skills".into(),
+                sdk_version: "0.1.0".into(),
+                capabilities: vec!["collections".into()],
+            });
+            let bindings = [ProjectPlugin {
+                id: 1,
+                revision: 1,
+                prepared,
+                enabled: true,
+            }];
+            let skills = openwebide_core::ProjectSkills {
+                enabled: true,
+                entries: vec![openwebide_core::ProjectSkill {
+                    plugin: None,
+                    id: 1,
+                    revision: 1,
+                    updated_at: 0,
+                    draft: openwebide_core::SkillDraft {
+                        name: "personal-guide".into(),
+                        description: "PRIVATE BUILTIN CATALOG".into(),
+                        instructions: "Guide".into(),
+                        enabled: true,
+                        resources: Vec::new(),
+                        metadata: Default::default(),
+                    },
+                }],
+            };
+            let memories = openwebide_core::ProjectMemories {
+                enabled: true,
+                entries: Vec::new(),
+            };
+            let mut prompt = None;
+            configure(
+                &mut tools,
+                &mut prompt,
+                &PluginContext {
+                    bindings: &bindings,
+                    memories: &memories,
+                    skills: &skills,
+                    context_limit: None,
+                },
+            );
+            assert!(
+                prompt.is_none(),
+                "SDK context owns the catalog contribution"
+            );
+            let executables = execution::configure_tools(&mut tools, &bindings).unwrap();
+            assert_eq!(executables.len(), 1);
+            for name in crate::skills::TOOL_NAMES {
+                assert_eq!(tools.iter().filter(|tool| tool.name == *name).count(), 1);
+            }
+        }
+    }
     #[test]
     fn optional_services_and_context_follow_enabled_plugins_in_both_host_modes() {
         for mut tools in [crate::vfs_tools(), crate::session::tools_for_host(true)] {
@@ -88,7 +177,13 @@ mod tests {
             assert!(tools.iter().any(|tool| tool.name == "run_command"));
             assert!(!tools.iter().any(|tool| matches!(
                 tool.name.as_str(),
-                "search_web" | "schedule_list" | "memory_read" | "skill_create" | "skill_creator"
+                "search_web"
+                    | "schedule_list"
+                    | "memory_read"
+                    | "skill_create"
+                    | "skill_creator"
+                    | "skill_read"
+                    | "skill_list"
             )));
             let mut prepared = openwebide_core::plugins::testing::receipt();
             prepared.manifest.compatibility.plugin_api = 2;
