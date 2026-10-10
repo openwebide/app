@@ -491,6 +491,86 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
                 .unwrap()
                 .is_empty()
         );
+        let failed = runtime
+            .execute(
+                &bytes,
+                services.clone(),
+                capabilities,
+                "schedule_create",
+                &json!({"draft":{"title":"Missing model","auto_title":false,"prompt":"Check build",
+                "session_target":"new","enabled":true,"schedule":{"kind":"once","at":165}}})
+                .to_string(),
+            )
+            .unwrap();
+        assert!(failed.ok, "{}", failed.content);
+        let created: Value = serde_json::from_str(&failed.content).unwrap();
+        let failed_task = created[0]["id"].as_i64().unwrap();
+        for server in block_on(store.list_connections()).unwrap() {
+            block_on(store.delete_connection(server.id)).unwrap();
+        }
+        clock.store(165, Ordering::Relaxed);
+        let delivery = block_on(store.claim_plugin_jobs("host", 0, &"4".repeat(32), 165)).unwrap();
+        let delivery = delivery
+            .jobs
+            .iter()
+            .find(|job| job.job.event == "task_due" && job.job.payload["task_id"] == failed_task)
+            .unwrap();
+        block_on(store.issue_plugin_job_grant(
+            user,
+            "host",
+            delivery.job.id,
+            &delivery.lease,
+            &"5".repeat(32),
+            165,
+        ))
+        .unwrap();
+        let failure_services = Services {
+            grant: "5".repeat(32),
+            ..services.clone()
+        };
+        let failed = runtime
+            .event(
+                &bytes,
+                failure_services.clone(),
+                capabilities,
+                EventInput {
+                    name: delivery.job.event.clone(),
+                    payload: delivery.job.payload.clone(),
+                },
+            )
+            .unwrap();
+        assert!(failed.ok, "{}", failed.content);
+        let mut readback = failure_services;
+        let history: Value = serde_json::from_str(
+            &readback
+                .request(
+                    "collections",
+                    &json!({"collection":"task_runs","operation":{"action":"list"}}).to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let history = history["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|record| record["value"]["task_id"] == failed_task)
+            .unwrap();
+        assert_eq!(history["value"]["snapshot"]["status"], "failed");
+        assert!(history["value"]["run_id"].is_null());
+        let tasks = block_on(store.scheduled_tasks(user, Some(project), 165)).unwrap();
+        let failed_task = tasks.iter().find(|task| task.id == failed_task).unwrap();
+        assert!(failed_task.next_run.is_none());
+        assert!(failed_task.last_run.is_some());
+        block_on(store.finish_plugin_job(
+            "host",
+            delivery.job.id,
+            &delivery.lease,
+            true,
+            "Source recorded preflight failure",
+            165,
+        ))
+        .unwrap();
         assert_eq!(prepared.manifest.compatibility.plugin_api, 3);
     }
 }

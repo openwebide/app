@@ -55,6 +55,27 @@ impl<D: Db> Store<D> {
             RecordOperation::Create { value } | RecordOperation::Update { value, .. } => {
                 let value: TaskValue = serde_json::from_value(value.clone())
                     .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                let previous =
+                    if let RecordOperation::Update { id, revision, .. } = request.operation {
+                        self.plugin_task_mutable(user, project, &owner, id, revision)
+                            .await?;
+                        let rows = self
+                            .db
+                            .execute(
+                                "SELECT draft FROM scheduled_tasks WHERE id=?",
+                                &[DbValue::Int(id)],
+                            )
+                            .await?;
+                        let row = rows
+                            .rows
+                            .first()
+                            .ok_or(StorageError::NotFound("Task".into()))?;
+                        let draft: TaskDraft = serde_json::from_str(row.get_text(0)?)
+                            .map_err(|error| StorageError::Db(error.to_string()))?;
+                        Some(draft)
+                    } else {
+                        None
+                    };
                 // Data integrity only: cron, future times, recurrence and expiry decisions live in source.
                 if value.draft.title.trim().is_empty()
                     || value.draft.title.chars().count() > 120
@@ -82,7 +103,12 @@ impl<D: Db> Store<D> {
                     && (model.model.trim().is_empty()
                         || model.model.len() > 256
                         || model.model.chars().any(char::is_control)
-                        || !self.get_connection(model.server_id).await?.enabled)
+                        // Result bookkeeping can retain a previously owned model that
+                        // disappeared; new model assignments must still be valid.
+                        || (previous
+                            .as_ref()
+                            .is_none_or(|draft| draft.model != value.draft.model)
+                            && !self.get_connection(model.server_id).await?.enabled))
                 {
                     return Err(StorageError::InvalidRequest(
                         "Invalid task model selection".into(),
@@ -116,8 +142,6 @@ impl<D: Db> Store<D> {
                 ];
                 let id = match request.operation {
                     RecordOperation::Update { id, revision, .. } => {
-                        self.plugin_task_mutable(user, project, &owner, id, revision)
-                            .await?;
                         params.extend([DbValue::Int(id), DbValue::Int(revision)]);
                         self.db.execute("UPDATE scheduled_tasks SET draft=?,enabled=?,next_run=?,session_id=?,host_id=?,plugin_owner=?,plugin_state=?,plugin_updated_at=?,revision=revision+1,path=NULL WHERE id=? AND revision=?",&params).await?;
                         id

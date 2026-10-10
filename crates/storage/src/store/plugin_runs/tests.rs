@@ -2557,6 +2557,94 @@ fn task_history_projects_progress_preserves_legacy_ids_and_survives_raw_history_
 }
 
 #[test]
+fn task_bookkeeping_preserves_existing_deleted_models_without_accepting_new_ones() {
+    use openwebide_core::{NewConnection, ProviderKind, plugins::records::CollectionResult};
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let model = f
+                .store
+                .insert_connection(&NewConnection {
+                    name: "Deleted model".into(),
+                    kind: ProviderKind::Ollama,
+                    base_url: "http://model.test".into(),
+                    model: Some("model".into()),
+                    context_limit: None,
+                })
+                .await
+                .unwrap()
+                .id;
+            let request = |operation| PluginHostRequest {
+                grant: "a".repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":"tasks","operation":operation}).to_string(),
+            };
+            let mut value = json!({"draft":{"title":"Saved task","prompt":"Check",
+                "session_target":"existing","session_id":f.session,"enabled":true,
+                "model":{"server_id":model,"model":"model"},
+                "schedule":{"kind":"once","at":100}},"next_run":100,"state":{}});
+            let created: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"create","value":value})),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let record = &created.records[0];
+            f.store.delete_connection(model).await.unwrap();
+            value["next_run"] = json!(null);
+            value["state"] =
+                json!({"last_result":{"state":"failed","detail":"Model no longer exists"}});
+            let saved: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"update","id":record.id,
+                    "revision":record.revision,"value":value})),
+                        3,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved.records[0].value["draft"]["model"]["server_id"], model);
+            assert!(saved.records[0].value["next_run"].is_null());
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({"action":"create","value":value})),
+                        4
+                    )
+                    .await
+                    .is_err()
+            );
+            value["draft"]["model"]["server_id"] = json!(model + 1000);
+            assert!(
+                f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request(json!({
+                "action":"update","id":record.id,"revision":saved.records[0].revision,
+                "value":value})),
+                        4
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
 fn task_history_requires_owned_tasks_scoped_snapshots_and_immutable_keys() {
     use openwebide_core::plugins::records::CollectionResult;
     block_on(async {

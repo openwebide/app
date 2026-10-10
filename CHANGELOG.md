@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Record Scheduling preflight failures in task history when a conversation or model is unavailable. The Rust plugin advances recurring tasks, stops failed monitors and journals interrupted history writes for bounded reconciliation. Preserve prompts already accepted before configuration changes; deployment remains in progress.
+
 - Recover failed Scheduling completion deliveries from retained terminal callback snapshots, including after raw-run deletion. The Rust plugin saves task state and history before removing the callback; live deliveries remain with their worker. Retention, preflight reporting and deployment remain in progress.
 
 - Select real Rust Web, Memory, Scheduling and Skill Authoring implementations for new bundled defaults. Distribution builds compile them through the normal compiler sandbox, verify public exports and embed source/SDK/toolchain-pinned WASM for offline server and paired-host installation. Preserve existing version choices, removals and project opt-outs; existing transitional installations require a reviewed update. Production image/browser rollout remains in progress.
