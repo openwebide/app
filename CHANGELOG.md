@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Recover failed Scheduling completion deliveries from retained terminal callback snapshots, including after raw-run deletion. The Rust plugin saves task state and history before removing the callback; live deliveries remain with their worker. Retention, preflight reporting and deployment remain in progress.
+
 - Select real Rust Web, Memory, Scheduling and Skill Authoring implementations for new bundled defaults. Distribution builds compile them through the normal compiler sandbox, verify public exports and embed source/SDK/toolchain-pinned WASM for offline server and paired-host installation. Preserve existing version choices, removals and project opt-outs; existing transitional installations require a reviewed update. Production image/browser rollout remains in progress.
 
 - Route Tasks create, edit, pause/resume and delete, plus monitor mutations, through declared SDK tools in the shared host facade. Preserve projectless scope, titles on enablement and conversation-scoped monitor cancellation. Monitor flyout refreshes only read owned data; local unattended work uses the shared host folder binding. Deployed paired-host verification remains in progress.

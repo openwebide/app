@@ -139,7 +139,7 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
                 .unwrap();
             (user, project, session, prepared)
         });
-        let services = Services {
+        let mut services = Services {
             store: store.clone(),
             user,
             grant: "a".repeat(32),
@@ -324,30 +324,87 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
             .jobs
             .remove(0);
         assert_eq!(callback.job.event, "task_completed");
-        block_on(store.issue_plugin_job_grant(
-            user,
+        // A failed callback must remain recoverable after the raw run has already been deleted.
+        block_on(store.finish_plugin_job(
             "host",
             callback.job.id,
             &callback.lease,
-            &"e".repeat(32),
+            false,
+            "Actor failed before applying its completion",
             105,
+        ))
+        .unwrap();
+        clock.store(160, Ordering::Relaxed);
+        let recovery = block_on(store.claim_plugin_jobs("host", 0, &"7".repeat(32), 160)).unwrap();
+        let recovery = recovery
+            .jobs
+            .iter()
+            .find(|job| job.job.event == "reconcile" && job.context.project_id == Some(project))
+            .unwrap();
+        block_on(store.issue_plugin_job_grant(
+            user,
+            "host",
+            recovery.job.id,
+            &recovery.lease,
+            &"8".repeat(32),
+            160,
         ))
         .unwrap();
         let result = runtime
             .event(
                 &bytes,
                 Services {
-                    grant: "e".repeat(32),
+                    grant: "8".repeat(32),
                     ..services.clone()
                 },
                 capabilities,
                 EventInput {
-                    name: callback.job.event,
-                    payload: callback.job.payload,
+                    name: recovery.job.event.clone(),
+                    payload: recovery.job.payload.clone(),
                 },
             )
             .unwrap();
         assert!(result.ok, "{}", result.content);
+        let mut readback = Services {
+            grant: "8".repeat(32),
+            ..services.clone()
+        };
+        let remaining: Value = serde_json::from_str(
+            &readback
+                .request("jobs", &json!({"action":"list","after":0}).to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            remaining["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|job| job["id"] != callback.job.id)
+        );
+        block_on(store.finish_plugin_job(
+            "host",
+            recovery.job.id,
+            &recovery.lease,
+            true,
+            "Recovered failed completion",
+            160,
+        ))
+        .unwrap();
+        block_on(store.issue_plugin_context_grant(
+            user,
+            &PluginExecutionContext {
+                user_action: true,
+                project_id: Some(project),
+                session_id: None,
+                primary: None,
+            },
+            &prepared,
+            &"6".repeat(32),
+            160,
+        ))
+        .unwrap();
+        services.grant = "6".repeat(32);
         assert_eq!(
             block_on(store.scheduled_tasks(user, Some(project), 105)).unwrap()[0]
                 .last_run

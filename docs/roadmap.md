@@ -405,7 +405,8 @@ capability.
   record prerequisites atomically reject stale new prompt submissions. Scoped history
   bindings project raw-run progress and retain terminal snapshots after cleanup.
   Declared background events now drive source-owned timer/run/deletion repair and
-  source-version handoff, through current enabled bindings in both host modes. Finish
+  source-version handoff, through current enabled bindings in both host modes. Terminal
+  callback snapshots repair failed completion deliveries after raw-run cleanup. Finish
   source-owned retention and preflight failure reporting
   and complete cancellation/recovery verification,
   then activate the executable release. Task and monitor mutations now share guarded
