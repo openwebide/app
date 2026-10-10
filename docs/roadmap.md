@@ -397,7 +397,9 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
-- Connect declared SDK event callbacks to durable job delivery and run completion.
+- Connect the durable one-shot job queue and declared SDK event callbacks to
+  automatic background delivery and run submission/completion. Queue persistence,
+  version pinning, leases and scoped callback authority already share one store.
   Route remaining UI and background invocations through the sessionless
   execution-context API; Memory mutations already use shared guarded actions.
 - Extend authenticated, run-pinned private record callbacks with shared collection

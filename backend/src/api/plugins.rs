@@ -120,7 +120,7 @@ impl openwebide_agent::plugins::execution::GrantedHost for PlanningHost<'_> {
     }
 }
 
-async fn execute_host_request(
+pub(crate) async fn execute_host_request(
     store: &openwebide_storage::Store<crate::state::AppDb>,
     user: UserId,
     session: Option<i64>,

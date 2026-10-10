@@ -28,7 +28,11 @@ impl Plugin for Fixture {
     fn execute(name: &str, arguments: serde_json::Value) -> Result<Outcome, String> {
         match name {
             "fixture_echo" => {
-                let response: serde_json::Value = openwebide_plugin_sdk::request("records", &arguments)?;
+                let response: serde_json::Value = if let Some(operation) = arguments.get("jobs") {
+                    openwebide_plugin_sdk::jobs(operation)?
+                } else {
+                    openwebide_plugin_sdk::request("records", &arguments)?
+                };
                 Ok(Outcome {ok: true, content: response.to_string(), summary: "Host capability response".into()})
             }
             "fixture_panic" => panic!("fixture trap"),

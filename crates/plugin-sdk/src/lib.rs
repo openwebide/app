@@ -91,6 +91,14 @@ pub fn collections<T: Serialize, R: serde::de::DeserializeOwned>(
     )
 }
 
+/// Durable one-shot event jobs. Operations are list/read/schedule/cancel/delete.
+/// Delete removes terminal jobs and their retained idempotency keys.
+/// The host supplies scope, idempotency, leases and immutable program snapshots;
+/// plugins calculate due times and recurrence and interpret event results.
+pub fn jobs<T: Serialize, R: serde::de::DeserializeOwned>(operation: &T) -> Result<R, String> {
+    request("jobs", operation)
+}
+
 /// The host independently validates names, schemas and requested capabilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

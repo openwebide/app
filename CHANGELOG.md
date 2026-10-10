@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add capability-gated durable plugin jobs with immutable source snapshots, idempotency keys, bounded pages, renewable leases and terminal-job cleanup. Scope callbacks to the current delivery and stop new claims for disabled plugins. Background polling, run submission and the Scheduling migration remain in progress.
+
 - Prepare pinned Rust plugins on the selected execution host before agent tools, context hooks and event callbacks. Validate source, manifest and digest before execution, supporting cold caches and offline reuse through the same shared workflow.
 
 - Route Memory UI mutations through declared executable-plugin actions, sharing grants, validation, cancellation and stale-result guards with agent execution. Preserve explicit manual editing while automatic Memory context is disabled. Executable defaults and deployment remain in progress.

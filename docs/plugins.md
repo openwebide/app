@@ -191,7 +191,14 @@ Plugins can also declare `contributions.events` and export matching names throug
 capability-gated workflow as tools, using a fresh WASM instance. Event payloads
 are bounded to 256 KiB; undeclared names are rejected before execution. An
 event-only plugin may export no model-facing tools. These callbacks provide the
-execution contract; durable queues, job delivery and scheduling remain unfinished.
+execution contract. The `jobs` capability supplies a durable one-shot queue with
+idempotency keys, version snapshots, bounded pages and renewable delivery leases.
+Jobs retain their creating plugin version across updates; disabled or removed
+plugins receive no new claims. Lease-bound callbacks stop after cancellation,
+completion or lease replacement. Terminal jobs can be deleted to release quota
+and their idempotency keys. Queue callbacks and daemon RPC are implemented;
+automatic background delivery, run submission and Scheduling policy migration
+remain unfinished.
 
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.

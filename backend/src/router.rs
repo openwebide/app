@@ -39,6 +39,7 @@ enum Route {
     ScheduledCommand,
     ScheduledSessionCommand,
     ScheduledDue,
+    PluginJobService,
     HostJournal,
     HostInspect,
     HostConnection,
@@ -204,6 +205,7 @@ fn resolve(method: &str, segments: &[&str]) -> Option<Route> {
         ("POST", ["host", "journal"]) => Some(Route::HostJournal),
         ("POST", ["sessions", id, "host"]) if numeric_id(id) => Some(Route::HostInspect),
         ("POST", ["scheduled-tasks", "due"]) => Some(Route::ScheduledDue),
+        ("POST", ["plugins", "jobs", "service"]) => Some(Route::PluginJobService),
         ("POST", ["scheduled-tasks", "result"]) => Some(Route::ScheduledResult),
         ("POST", ["sessions", id, "scheduled-tasks"]) if numeric_id(id) => {
             Some(Route::ScheduledSessionCommand)
@@ -408,12 +410,17 @@ pub async fn route(req: Request) -> JsonResp {
     if matches!(
         route,
         Some(
-            Route::PushDispatch | Route::ScheduledDue | Route::ScheduledResult | Route::HostJournal
+            Route::PushDispatch
+                | Route::ScheduledDue
+                | Route::ScheduledResult
+                | Route::HostJournal
+                | Route::PluginJobService
         )
     ) {
         let result = match crate::auth::require_bridge_service(&state, req.headers()).await {
             Ok(()) => match route {
                 Some(Route::HostJournal) => api::host_admin::journal(req, &state).await,
+                Some(Route::PluginJobService) => api::plugin_jobs::service(req, &state).await,
                 Some(Route::ScheduledDue) => api::scheduled::due(req, &state).await,
                 Some(Route::ScheduledResult) => api::scheduled::result(req, &state).await,
                 _ => api::push::dispatch(&state).await,
@@ -1046,6 +1053,7 @@ mod tests {
                 Route::FilesGet,
                 Route::SendSessionMessage,
                 Route::WebFetch,
+                Route::PluginJobService,
             ] {
                 let error = authenticate_route(&state, &headers, Some(route), "")
                     .await
@@ -1097,6 +1105,7 @@ mod tests {
             ),
             ("POST", "plugins/host", Route::PluginContextHostRequest),
             ("POST", "plugins/invoke", Route::PluginStartInvocation),
+            ("POST", "plugins/jobs/service", Route::PluginJobService),
             ("POST", "plugins/continue", Route::PluginContinueInvocation),
             ("POST", "plugins/cancel", Route::PluginCancelInvocation),
             ("GET", "projects/5/memories", Route::GetProjectMemories),

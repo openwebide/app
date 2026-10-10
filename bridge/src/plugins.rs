@@ -1039,16 +1039,26 @@ mod rust_plugin_tests {
     use super::{tests::command, *};
     use openwebide_core::plugins::execution;
     struct DatabaseHost {
-        store: openwebide_storage::Store<openwebide_storage::rusqlite_db::RusqliteDb>,
+        store: Arc<openwebide_storage::Store<openwebide_storage::rusqlite_db::RusqliteDb>>,
         user: openwebide_core::UserId,
-        session: i64,
+        session: Option<i64>,
+        now: i64,
     }
     impl openwebide_agent::plugins::execution::GrantedHost for DatabaseHost {
         async fn request(&self, request: &execution::PluginHostRequest) -> Result<String, String> {
-            self.store
-                .plugin_host_request(self.user, self.session, request, 10)
-                .await
-                .map_err(|error| error.to_string())
+            let result = match self.session {
+                Some(session) => {
+                    self.store
+                        .plugin_host_request(self.user, session, request, self.now)
+                        .await
+                }
+                None => {
+                    self.store
+                        .plugin_context_host_request(self.user, request, self.now)
+                        .await
+                }
+            };
+            result.map_err(|error| error.to_string())
         }
     }
     struct NoBuiltin;
@@ -1073,9 +1083,9 @@ mod rust_plugin_tests {
             NewProject, UserRole, WorkspaceMode,
             plugins::{PluginPackage, RecordPlugin},
         };
-        let store = openwebide_storage::Store::new(
+        let store = Arc::new(openwebide_storage::Store::new(
             openwebide_storage::rusqlite_db::RusqliteDb::open_in_memory().unwrap(),
-        );
+        ));
         store.migrate().await.unwrap();
         let user = store
             .insert_user("owner", "hash", UserRole::Admin, 0)
@@ -1136,9 +1146,10 @@ mod rust_plugin_tests {
             },
             services: GrantedServices {
                 host: DatabaseHost {
-                    store,
+                    store: store.clone(),
                     user,
-                    session,
+                    session: Some(session),
+                    now: 10,
                 },
                 grants: Arc::new([(prepared.digest.clone(), token)].into_iter().collect()),
             },
@@ -1163,6 +1174,88 @@ mod rust_plugin_tests {
             serde_json::from_str::<serde_json::Value>(&outcome.content).unwrap(),
             result
         );
+        // Public SDK code schedules a real durable event; delivery uses the same executor.
+        let scheduled = executor.execute(&openwebide_core::ToolCall {
+            id:"schedule".into(), name:"fixture_echo".into(),
+            arguments:serde_json::json!({"jobs":{"action":"schedule","key":"event-one","due_at":20,"expires_at":null,"event":"job_due","payload":{"text":"durable plugin event"}}}).to_string(),
+        }).await;
+        assert!(scheduled.ok, "{}", scheduled.content);
+        let queued: openwebide_core::plugins::jobs::JobResult =
+            serde_json::from_str(&scheduled.content).unwrap();
+        let delivery = store
+            .claim_plugin_jobs(&prepared.host_id, 0, &"e".repeat(32), 20)
+            .await
+            .unwrap()
+            .jobs
+            .remove(0);
+        assert_eq!(delivery.job.id, queued.jobs[0].id);
+        let grant = "f".repeat(32);
+        let (pinned, context) = store
+            .issue_plugin_job_grant(
+                user,
+                &prepared.host_id,
+                delivery.job.id,
+                &delivery.lease,
+                &grant,
+                21,
+            )
+            .await
+            .unwrap();
+        assert!(context.session_id.is_none());
+        assert!(!context.user_action);
+        let outcome = openwebide_agent::plugins::execution::invoke_plugin(
+            &executor.transport,
+            &GrantedServices {
+                grants: Arc::new(
+                    [(pinned.digest.clone(), grant.clone())]
+                        .into_iter()
+                        .collect(),
+                ),
+                host: DatabaseHost {
+                    store: store.clone(),
+                    user,
+                    session: None,
+                    now: 21,
+                },
+            },
+            execution::InvokePlugin {
+                operation: execution::PluginOperation::Event,
+                prepared: pinned,
+                name: String::new(),
+                arguments: serde_json::to_string(&execution::EventInput {
+                    name: delivery.job.event.clone(),
+                    payload: delivery.job.payload.clone(),
+                })
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(outcome.ok, "{}", outcome.content);
+        assert!(outcome.content.contains("durable plugin event"));
+        store
+            .finish_plugin_job(
+                &prepared.host_id,
+                delivery.job.id,
+                &delivery.lease,
+                outcome.ok,
+                &outcome.summary,
+                22,
+            )
+            .await
+            .unwrap();
+        let callback = execution::PluginHostRequest {
+            grant,
+            capability: "records".into(),
+            payload: serde_json::json!({"collection":"events","operation":{"action":"list"}})
+                .to_string(),
+        };
+        assert!(
+            store
+                .plugin_context_host_request(user, &callback, 23)
+                .await
+                .is_err()
+        );
     }
     #[tokio::test]
     async fn source_compilation_validates_tools_caches_offline_and_rejects_artifact_corruption() {
@@ -1171,7 +1264,7 @@ mod rust_plugin_tests {
             "schemaVersion":1,"publisher":"example","name":"fixture","version":"0.1.0",
             "displayName":"Fixture","description":"SDK adapter contract","license":"MIT",
             "compatibility":{"pluginApi":3},
-            "executable":{"manifest":"Cargo.toml","library":"sdk_fixture","sdkVersion":"0.1.0","capabilities":["records"]},
+            "executable":{"manifest":"Cargo.toml","library":"sdk_fixture","sdkVersion":"0.1.0","capabilities":["records","jobs"]},
             "contributions":{"skills":[],"events":["job_due"],"tools":[{"name":"fixture_echo","description":"Exercise the public host contract.","parameters":{"type":"object","properties":{}},"requires_approval":false}]}
         })).unwrap();
         let cargo = include_str!("../../crates/plugin-sdk/examples/fixture/Cargo.toml")

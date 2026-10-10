@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 49;
+pub const SCHEMA_VERSION: i64 = 50;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -503,8 +503,8 @@ async fn apply_step<D: Db>(
         48 => {
             db.execute("DROP TRIGGER IF EXISTS delete_project_plugin_grants", &[])
                 .await?;
-            // This unreleased rebuild also preserves the action marker on replay.
-            db.execute("CREATE TABLE IF NOT EXISTS plugin_execution_grants_context (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, prepared TEXT NOT NULL, expires_at INTEGER NOT NULL, primary_model TEXT, user_action INTEGER NOT NULL DEFAULT 0)", &[]).await?;
+            // This unreleased rebuild preserves action and job authority markers on replay.
+            db.execute("CREATE TABLE IF NOT EXISTS plugin_execution_grants_context (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, session_id INTEGER REFERENCES sessions(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, prepared TEXT NOT NULL, expires_at INTEGER NOT NULL, primary_model TEXT, user_action INTEGER NOT NULL DEFAULT 0, job_id INTEGER, job_lease TEXT)", &[]).await?;
             let primary = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='primary_model'", &[]).await?;
             let action = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='user_action'", &[]).await?;
             let primary = if primary.rows.is_empty() {
@@ -517,7 +517,19 @@ async fn apply_step<D: Db>(
             } else {
                 "user_action"
             };
-            db.execute(&format!("INSERT OR IGNORE INTO plugin_execution_grants_context SELECT token,user_id,session_id,project_scope,prepared,expires_at,{primary},{action} FROM plugin_execution_grants"), &[]).await?;
+            let job_id = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='job_id'", &[]).await?;
+            let job_lease = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='job_lease'", &[]).await?;
+            let job_id = if job_id.rows.is_empty() {
+                "NULL"
+            } else {
+                "job_id"
+            };
+            let job_lease = if job_lease.rows.is_empty() {
+                "NULL"
+            } else {
+                "job_lease"
+            };
+            db.execute(&format!("INSERT OR IGNORE INTO plugin_execution_grants_context SELECT token,user_id,session_id,project_scope,prepared,expires_at,{primary},{action},{job_id},{job_lease} FROM plugin_execution_grants"), &[]).await?;
             db.execute("DROP TABLE plugin_execution_grants", &[])
                 .await?;
             db.execute(
@@ -533,6 +545,29 @@ async fn apply_step<D: Db>(
             let columns = db.execute("SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name='user_action'", &[]).await?;
             if columns.rows.is_empty() {
                 db.execute("ALTER TABLE plugin_execution_grants ADD COLUMN user_action INTEGER NOT NULL DEFAULT 0", &[]).await?;
+            }
+            Ok(())
+        }
+        50 => {
+            db.execute("CREATE TABLE IF NOT EXISTS plugin_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, plugin TEXT NOT NULL, job_key TEXT NOT NULL, due_at INTEGER NOT NULL, expires_at INTEGER, event TEXT NOT NULL, payload TEXT NOT NULL, prepared TEXT NOT NULL, context TEXT NOT NULL, host_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', revision INTEGER NOT NULL DEFAULT 1, attempts INTEGER NOT NULL DEFAULT 0, lease TEXT, lease_expires_at INTEGER, detail TEXT, UNIQUE(user_id,project_scope,plugin,job_key))", &[]).await?;
+            db.execute("CREATE INDEX IF NOT EXISTS plugin_jobs_due ON plugin_jobs(host_id,state,due_at,id)", &[]).await?;
+            db.execute("CREATE TRIGGER IF NOT EXISTS delete_project_plugin_jobs AFTER DELETE ON projects BEGIN DELETE FROM plugin_jobs WHERE project_scope=OLD.id; END", &[]).await?;
+            for (name, declaration) in [("job_id", "INTEGER"), ("job_lease", "TEXT")] {
+                let columns = db
+                    .execute(
+                        "SELECT 1 FROM pragma_table_info('plugin_execution_grants') WHERE name=?",
+                        &[crate::db::DbValue::Text(name.into())],
+                    )
+                    .await?;
+                if columns.rows.is_empty() {
+                    db.execute(
+                        &format!(
+                            "ALTER TABLE plugin_execution_grants ADD COLUMN {name} {declaration}"
+                        ),
+                        &[],
+                    )
+                    .await?;
+                }
             }
             Ok(())
         }

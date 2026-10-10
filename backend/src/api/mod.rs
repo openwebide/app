@@ -4,6 +4,7 @@ pub(crate) mod assistance;
 pub(crate) mod completion;
 pub(crate) mod host_admin;
 pub(crate) mod naming;
+pub(crate) mod plugin_jobs;
 pub(crate) mod scheduled;
 pub(crate) mod session_search;
 use std::sync::Arc;

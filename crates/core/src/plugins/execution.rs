@@ -66,6 +66,13 @@ pub struct ContextContribution {
 pub fn context_request_allowed(capability: &str, payload: &str) -> bool {
     match capability {
         "clock" => true,
+        "jobs" => serde_json::from_str::<super::jobs::JobRequest>(payload).is_ok_and(|request| {
+            request.validate(0).is_ok()
+                && matches!(
+                    request,
+                    super::jobs::JobRequest::List { .. } | super::jobs::JobRequest::Read { .. }
+                )
+        }),
         "records" | "collections" => serde_json::from_str::<super::records::RecordRequest>(payload)
             .is_ok_and(|request| {
                 request.validate().is_ok()
@@ -156,4 +163,25 @@ pub enum PluginStep {
     Failed {
         error: String,
     },
+}
+
+#[cfg(test)]
+mod context_job_tests {
+    use super::context_request_allowed;
+    #[test]
+    fn planning_hooks_can_read_jobs_but_cannot_schedule_cancel_or_choose_a_scope() {
+        for request in [r#"{"action":"list"}"#, r#"{"action":"read","id":1}"#] {
+            assert!(context_request_allowed("jobs", request));
+        }
+        for request in [
+            r#"{"action":"read","id":0}"#,
+            r#"{"action":"list","user_id":2}"#,
+            r#"{"action":"schedule","key":"next","due_at":20,"expires_at":null,"event":"due","payload":null}"#,
+            r#"{"action":"cancel","id":1,"revision":1}"#,
+            r#"{"action":"delete","id":1,"revision":1}"#,
+            r#"{"action":"grant","user_id":1}"#,
+        ] {
+            assert!(!context_request_allowed("jobs", request));
+        }
+    }
 }

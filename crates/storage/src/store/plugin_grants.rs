@@ -101,7 +101,7 @@ impl<D: Db> Store<D> {
         grant: &str,
         now: i64,
     ) -> Result<(PreparedPlugin, PluginExecutionContext), StorageError> {
-        let grant = self.db.execute("SELECT prepared,project_scope,session_id,primary_model,user_action FROM plugin_execution_grants WHERE token=? AND user_id=? AND expires_at>?", &[
+        let grant = self.db.execute("SELECT prepared,project_scope,session_id,primary_model,user_action,job_id,job_lease FROM plugin_execution_grants WHERE token=? AND user_id=? AND expires_at>?", &[
             DbValue::Text(grant.to_owned()), DbValue::Int(user.get()), DbValue::Int(now),
         ]).await?;
         let row = grant
@@ -111,6 +111,15 @@ impl<D: Db> Store<D> {
         let grant_session = row.get_int_opt(2);
         if session != grant_session {
             return Err(StorageError::NotFound("Plugin execution grant".into()));
+        }
+        if let Some(job) = row.get_int_opt(5) {
+            let lease = row.get_text(6)?;
+            let current = self.db.execute("SELECT 1 FROM plugin_jobs WHERE id=? AND user_id=? AND state='leased' AND lease=? AND lease_expires_at>?", &[DbValue::Int(job),DbValue::Int(user.get()),DbValue::Text(lease.into()),DbValue::Int(now)]).await?;
+            if current.rows.is_empty() {
+                return Err(StorageError::Conflict(
+                    "Job lease is no longer current".into(),
+                ));
+            }
         }
         let project = row.get_int(1)?;
         let context = PluginExecutionContext {
@@ -166,7 +175,7 @@ impl<D: Db> Store<D> {
                 .await
         })
     }
-    async fn validate_plugin_context(
+    pub(super) async fn validate_plugin_context(
         &self,
         user: UserId,
         context: &PluginExecutionContext,
@@ -293,6 +302,18 @@ impl<D: Db> Store<D> {
                     let (plugin, context) = store
                         .plugin_authority_in_transaction(user, session, request, now)
                         .await?;
+                    if request.capability == "jobs" {
+                        let context = store
+                            .plugin_job_origin_context(user, &request.grant, &context)
+                            .await?;
+                        let command = serde_json::from_str(&request.payload)
+                            .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                        let result = store
+                            .plugin_jobs_in_transaction(user, &plugin, &context, &command, now)
+                            .await?;
+                        return serde_json::to_string(&result)
+                            .map_err(|error| StorageError::Db(error.to_string()));
+                    }
                     let command: RecordRequest = serde_json::from_str(&request.payload)
                         .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
                     match request.capability.as_str() {

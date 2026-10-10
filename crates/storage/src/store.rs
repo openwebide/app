@@ -11,6 +11,7 @@ mod memories;
 mod model_setup;
 mod plugin_collections;
 mod plugin_grants;
+mod plugin_jobs;
 mod plugin_records;
 mod plugin_skill_collection;
 mod plugins;

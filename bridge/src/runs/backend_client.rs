@@ -261,6 +261,13 @@ impl BackendClient {
         Self { url, secret, http }
     }
 
+    pub async fn plugin_job_service(
+        &self,
+        request: &openwebide_core::plugins::jobs::JobServiceRequest,
+    ) -> Result<openwebide_core::plugins::jobs::JobServiceResponse, String> {
+        self.service_call("/plugins/jobs/service", json!(request))
+            .await
+    }
     pub async fn due_tasks(
         &self,
         host: &openwebide_core::scheduled::ExecutionHost,
