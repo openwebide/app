@@ -1,4 +1,5 @@
 //! Host-only plugin preparation policy, shared by every bridge transport.
+pub mod execution;
 pub mod marketplace;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::LazyLock};
 
@@ -232,11 +233,11 @@ impl PluginManifest {
                     != rust.capabilities.len()
                 || self.contributions.tools.is_empty()
                 || !self.contributions.tool_groups.is_empty())
-            {
-                return Err(invalid(
-                    "Unsupported Rust SDK, capability or library declaration.",
-                ));
-            }
+        {
+            return Err(invalid(
+                "Unsupported Rust SDK, capability or library declaration.",
+            ));
+        }
         let mut names = std::collections::BTreeSet::new();
         for tool in &self.contributions.tools {
             if tool.name.is_empty()

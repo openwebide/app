@@ -138,15 +138,23 @@ first-party identity dispatch, privileged feature endpoint or built-in fallback
 when a plugin is missing, disabled or fails. Skill-only contributions may remain
 instructions/resources without an executable.
 
-The proposed executable path is Rust source compiled in publisher CI into a WASM
-component. A public SDK and versioned component interfaces define exported handlers
-and imported host capabilities. Releases identify the artifact, checksum, pinned
-source and required host API version. Installation validates and prepares the
-artifact on the execution host; clients never execute it. Bundled plugins may be
-installed by default but receive the same interfaces and privileges.
+The executable path ships Rust source and a committed Cargo.lock. API 3 declares
+the library, SDK version, capabilities and exported tool schemas. Installation
+compiles source in isolation on the execution host, against its pinned compiler
+and embedded public SDK, then validates the exported schemas before activation.
+The artifact cache includes source, SDK and toolchain fingerprints. Compilation
+failures preserve the installed version; clients never compile or execute plugins.
+Publisher CI should validate source builds, but installing a plugin does not
+require a publisher-hosted WASM artifact. Bundled plugins receive the same
+interfaces and privileges.
+
+The SDK, source preparation and shared execution workflow are foundations in
+progress. HTTP and clock primitives run on the bridge; authenticated persistence,
+job and workspace callbacks, Linux installation verification and compiled offline
+defaults still need implementation. API 2 first-party plugins remain transitional.
 
 Prove the contract by moving Web's implementation into the plugins repository,
 then migrate Memory, Scheduling and Skill Authoring. Verify the same behavior in
 local and remote modes, including cancellation, crashes, disablement and updates,
-before calling those migrations complete. Executable runtimes, SDK, MCP servers,
-dependencies, language, UI and editor contributions remain on the roadmap.
+before calling those migrations complete. Completion of executable plugins, MCP
+servers, dependencies, language, UI and editor contributions remains on the roadmap.

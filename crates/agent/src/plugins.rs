@@ -1,4 +1,5 @@
 //! One contribution policy for local and remote run preparation.
+pub mod execution;
 use openwebide_core::{
     ToolDefinition,
     plugins::{PluginToolGroup, ProjectPlugin, enabled_tool_groups},

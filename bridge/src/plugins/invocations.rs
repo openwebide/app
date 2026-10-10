@@ -1,0 +1,320 @@
+//! Bounded component actors; transports supply authenticated ownership.
+use super::NativePluginInstaller;
+use openwebide_core::plugins::execution::{
+    ContinuePlugin, InvokePlugin, PluginInvocation, PluginStep,
+};
+use openwebide_plugin_runtime::{HostServices, MAX_MESSAGE_BYTES, Runtime};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
+};
+use tokio::sync::{Mutex, mpsc as async_mpsc};
+
+#[derive(Clone, Debug, Default)]
+pub struct Invocations {
+    entries: Arc<Mutex<HashMap<String, Arc<Invocation>>>>,
+}
+#[derive(Debug)]
+struct Invocation {
+    owner: String,
+    started: Instant,
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+    state: Mutex<InvocationState>,
+}
+#[derive(Debug)]
+struct InvocationState {
+    deferred: Option<DeferredInvocation>,
+    events: async_mpsc::Receiver<Event>,
+    pending: Option<(u32, mpsc::SyncSender<Result<String, String>>)>,
+}
+#[derive(Debug)]
+struct DeferredInvocation {
+    bytes: Vec<u8>,
+    call: InvokePlugin,
+    grants: Vec<String>,
+    sender: async_mpsc::Sender<Event>,
+}
+impl Drop for Invocation {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+#[derive(Debug)]
+enum Event {
+    HostCall {
+        sequence: u32,
+        capability: String,
+        payload: String,
+        response: mpsc::SyncSender<Result<String, String>>,
+    },
+    Finished(PluginStep),
+}
+struct Services {
+    runtime: tokio::runtime::Handle,
+    notify: Arc<tokio::sync::Notify>,
+    events: async_mpsc::Sender<Event>,
+    cancelled: Arc<AtomicBool>,
+    sequence: u32,
+}
+impl HostServices for Services {
+    fn request(&mut self, capability: &str, payload: &str) -> Result<String, String> {
+        if self.cancelled.load(Ordering::Relaxed) || self.sequence >= 128 {
+            return Err("Plugin invocation was cancelled or exceeded its host-call limit.".into());
+        }
+        self.sequence += 1;
+        if capability == "clock" {
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_secs();
+            return Ok(serde_json::json!({"unix_seconds":seconds}).to_string());
+        }
+        if capability == "http" {
+            return self.runtime.block_on(async {
+                if self.cancelled.load(Ordering::Relaxed) { return Err("Plugin invocation was cancelled.".into()); }
+                tokio::select! {
+                    () = self.notify.notified() => Err("Plugin invocation was cancelled.".into()),
+                    result = tokio::time::timeout(Duration::from_secs(30), super::http::request(payload)) => result.map_err(|_| "Plugin HTTP request timed out.".to_string())?,
+                }
+            });
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.events
+            .blocking_send(Event::HostCall {
+                sequence: self.sequence,
+                capability: capability.into(),
+                payload: payload.into(),
+                response: sender,
+            })
+            .map_err(|_| "Plugin invocation was closed.")?;
+        match receiver.recv_timeout(Duration::from_secs(60)) {
+            Ok(result) => result,
+            Err(_) => {
+                self.cancelled.store(true, Ordering::Relaxed);
+                Err("Plugin host call timed out or was cancelled.".into())
+            }
+        }
+    }
+}
+impl Invocations {
+    pub async fn start(
+        &self,
+        installer: &NativePluginInstaller,
+        owner: &str,
+        call: InvokePlugin,
+    ) -> Result<PluginInvocation, String> {
+        call.prepared
+            .validate()
+            .map_err(|error| error.to_string())?;
+        let rust = call
+            .prepared
+            .manifest
+            .executable
+            .as_ref()
+            .ok_or("Plugin has no executable")?;
+        if !call
+            .prepared
+            .manifest
+            .contributions
+            .tools
+            .iter()
+            .any(|tool| tool.name == call.name)
+            || call.arguments.len() > MAX_MESSAGE_BYTES
+        {
+            return Err(
+                "Tool is not declared by this plugin, or its arguments exceed the limit.".into(),
+            );
+        }
+        let _: serde_json::Value =
+            serde_json::from_str(&call.arguments).map_err(|error| error.to_string())?;
+        let bytes = installer
+            .component(owner, &call.prepared)
+            .await
+            .map_err(|error| error.to_string())?;
+        let id = format!("{:032x}", rand::random::<u128>());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = async_mpsc::channel(1);
+        let grants = rust.capabilities.clone();
+        let entry = Arc::new(Invocation {
+            owner: owner.into(),
+            started: Instant::now(),
+            cancelled,
+            notify: Arc::new(tokio::sync::Notify::new()),
+            state: Mutex::new(InvocationState {
+                events: receiver,
+                pending: None,
+                deferred: Some(DeferredInvocation {
+                    bytes,
+                    call,
+                    grants,
+                    sender,
+                }),
+            }),
+        });
+        {
+            let mut entries = self.entries.lock().await;
+            entries.retain(|_, entry| entry.started.elapsed() < Duration::from_secs(300));
+            if entries.len() >= 32
+                || entries
+                    .values()
+                    .filter(|entry| entry.owner == owner)
+                    .count()
+                    >= 8
+            {
+                return Err("Too many active plugin invocations.".into());
+            }
+            entries.insert(id.clone(), entry);
+        }
+        // No plugin code runs until the caller receives the id and resumes it.
+        Ok(PluginInvocation {
+            id,
+            step: PluginStep::Ready,
+        })
+    }
+    pub async fn resume(
+        &self,
+        owner: &str,
+        response: ContinuePlugin,
+    ) -> Result<PluginInvocation, String> {
+        if response
+            .response
+            .as_ref()
+            .map_or_else(String::len, String::len)
+            > MAX_MESSAGE_BYTES
+        {
+            return Err("Plugin host response exceeds its limit.".into());
+        }
+        let entry = self.entry(&response.id).await?;
+        if entry.owner != owner {
+            return Err("Plugin invocation belongs to another owner.".into());
+        }
+        {
+            let mut state = entry.state.lock().await;
+            if let Some(deferred) = state.deferred.take() {
+                if response.sequence != 0 || response.response != Ok(String::new()) {
+                    state.deferred = Some(deferred);
+                    return Err("Invalid initial plugin continuation.".into());
+                }
+                let DeferredInvocation {
+                    bytes,
+                    call,
+                    grants,
+                    sender,
+                } = deferred;
+                let services = Services {
+                    runtime: tokio::runtime::Handle::current(),
+                    notify: entry.notify.clone(),
+                    events: sender.clone(),
+                    cancelled: entry.cancelled.clone(),
+                    sequence: 0,
+                };
+                tokio::task::spawn_blocking(move || {
+                    let result = Runtime::new().and_then(|runtime| {
+                        runtime.execute(&bytes, services, &grants, &call.name, &call.arguments)
+                    });
+                    let step = match result {
+                        Ok(outcome) => PluginStep::Complete {
+                            ok: outcome.ok,
+                            content: outcome.content,
+                            summary: outcome.summary,
+                        },
+                        Err(error) => PluginStep::Failed {
+                            error: format!("Plugin execution failed: {error:#}"),
+                        },
+                    };
+                    let _ = sender.try_send(Event::Finished(step));
+                });
+            } else {
+                let pending = state
+                    .pending
+                    .as_ref()
+                    .ok_or("No plugin host response is pending")?;
+                if pending.0 != response.sequence {
+                    return Err("Stale plugin host response.".into());
+                }
+                let (_, sender) = state.pending.take().expect("checked pending call");
+                sender
+                    .send(response.response)
+                    .map_err(|_| "Plugin invocation has ended.")?;
+            }
+        }
+        self.next(owner, &response.id, entry).await
+    }
+    pub async fn cancel(&self, owner: &str, id: &str) -> Result<(), String> {
+        let entry = self.entry(id).await?;
+        if entry.owner != owner {
+            return Err("Plugin invocation belongs to another owner.".into());
+        }
+        entry.cancelled.store(true, Ordering::Relaxed);
+        entry.notify.notify_waiters();
+        if let Ok(mut state) = entry.state.try_lock() {
+            state.pending.take();
+        }
+        self.entries.lock().await.remove(id);
+        Ok(())
+    }
+    async fn entry(&self, id: &str) -> Result<Arc<Invocation>, String> {
+        self.entries
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| "Plugin invocation is no longer active.".into())
+    }
+    async fn next(
+        &self,
+        owner: &str,
+        id: &str,
+        entry: Arc<Invocation>,
+    ) -> Result<PluginInvocation, String> {
+        if entry.owner != owner {
+            return Err("Plugin invocation belongs to another owner.".into());
+        }
+        let mut state = entry.state.lock().await;
+        let event = if entry.cancelled.load(Ordering::Relaxed) {
+            None
+        } else {
+            tokio::select! {
+                () = entry.notify.notified() => None,
+                event = tokio::time::timeout(Duration::from_secs(60), state.events.recv()) => event.ok().flatten(),
+            }
+        };
+        let Some(event) = event else {
+            entry.cancelled.store(true, Ordering::Relaxed);
+            state.pending.take();
+            drop(state);
+            self.entries.lock().await.remove(id);
+            return Err("Plugin invocation timed out or ended without a result.".into());
+        };
+        let step = match event {
+            Event::HostCall {
+                sequence,
+                capability,
+                payload,
+                response,
+            } => {
+                state.pending = Some((sequence, response));
+                PluginStep::HostCall {
+                    sequence,
+                    capability,
+                    payload,
+                }
+            }
+            Event::Finished(step) => {
+                drop(state);
+                self.entries.lock().await.remove(id);
+                step
+            }
+        };
+        Ok(PluginInvocation {
+            id: id.into(),
+            step,
+        })
+    }
+}

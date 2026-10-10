@@ -13,6 +13,16 @@ use serde_json::{Value, json};
 use crate::runs::http_client::ReqwestHttpClient;
 
 pub trait RunBackend: Send + Sync {
+    fn plugin_request(
+        &self,
+        _user: i64,
+        _session: i64,
+        _plugin: &openwebide_core::plugins::PreparedPlugin,
+        _capability: &str,
+        _payload: &str,
+    ) -> impl Future<Output = Result<String, String>> + Send {
+        async { Err("Plugin host capability unavailable".into()) }
+    }
     fn host_journal(
         &self,
         _command: &openwebide_core::host_admin::HostJournalCommand,

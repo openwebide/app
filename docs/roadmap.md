@@ -397,12 +397,14 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
-- Build a public Rust SDK and versioned WASM component contract for executable
-  plugins, with exported handlers and general host capability imports. Publisher
-  CI builds artifacts; releases record artifact location, checksum, pinned source
-  and host API compatibility. Validate and execute components only on bridge hosts.
-  Provide an authoring example and reusable build/validation workflow for custom
-  marketplaces.
+- Complete the Rust SDK execution foundations with authenticated general
+  persistence, job and workspace primitives, capability-change approval,
+  installation progress and cancellation, Linux container build isolation, and
+  offline compiled defaults. Marketplaces ship pinned Rust source and Cargo.lock;
+  hosts compile against the declared SDK version and validate the WASM component
+  before activation. Cache artifacts by source, SDK and toolchain. Publish the SDK
+  distribution and source-authoring/custom-marketplace workflow, and verify the
+  complete install/run/update lifecycle through both host adapters.
 - Replace transitional first-party tool-group feature switches with plugin-owned
   implementations, starting with Web, then Memory, Scheduling and Skill Authoring.
   Require the same public SDK, interfaces and privileges as community plugins:

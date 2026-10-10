@@ -1,4 +1,7 @@
 //! Native Git/object and atomic filesystem primitives for shared plugin policy.
+mod http;
+pub mod invocations;
+pub mod transport;
 use openwebide_core::plugins::{
     MAX_PACKAGE_BYTES, MAX_PACKAGE_FILE_BYTES, MAX_PACKAGE_FILES, PackageFile, PackageFileKind,
     PluginError, PluginFuture, PluginHost, PluginSource, PreparedPlugin, prepare_plugin,
@@ -56,10 +59,15 @@ fn bundled_files(source: &PluginSource) -> Option<Vec<PackageFile>> {
         })
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NativePluginInstaller {
     root: Option<PathBuf>,
     lock: Arc<Mutex<()>>,
+}
+impl Default for NativePluginInstaller {
+    fn default() -> Self {
+        Self::new(default_root())
+    }
 }
 impl NativePluginInstaller {
     pub fn new(root: Option<PathBuf>) -> Self {
@@ -85,10 +93,30 @@ impl NativePluginInstaller {
             .root
             .as_ref()
             .ok_or_else(|| host_error("Plugin cache is not configured."))?;
+        if !root.is_absolute() {
+            return Err(host_error("Plugin cache path must be absolute."));
+        }
         let host = ScopedHost {
             root: root.join(key(owner)),
             host_id: prepared.host_id.clone(),
         };
+        let manifest_path = host
+            .snapshot(&prepared.source, &prepared.digest)
+            .join("plugin.json");
+        reject_link(&manifest_path)?;
+        if std::fs::metadata(&manifest_path).map_err(io_error)?.len()
+            > MAX_PACKAGE_FILE_BYTES as u64
+        {
+            return Err(host_error("Cached plugin manifest exceeds its limit."));
+        }
+        let manifest: openwebide_core::plugins::PluginManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).map_err(io_error)?)
+                .map_err(|error| host_error(error.to_string()))?;
+        if manifest != prepared.manifest {
+            return Err(host_error(
+                "Plugin receipt does not match its prepared executable.",
+            ));
+        }
         load_artifact(&host.artifact(&prepared.source, &prepared.digest))
     }
     pub async fn package(
@@ -1001,6 +1029,7 @@ mod bundled_tests {
 #[cfg(test)]
 mod rust_plugin_tests {
     use super::*;
+    use openwebide_core::plugins::execution;
     #[tokio::test]
     async fn source_compilation_validates_tools_caches_offline_and_rejects_artifact_corruption() {
         let root = tempfile::tempdir().unwrap();
@@ -1035,18 +1064,128 @@ mod rust_plugin_tests {
         openwebide_core::plugins::validate_files(&files).unwrap();
         let source = openwebide_core::plugins::testing::source();
         let digest = openwebide_core::plugins::package_digest(&files);
+        let installer = NativePluginInstaller::new(Some(root.path().to_path_buf()));
         for host_id in ["server-host", "paired-local-host"] {
+            let owner = if host_id == "server-host" {
+                "user:1"
+            } else {
+                "paired"
+            };
             let host = ScopedHost {
-                root: root.path().to_path_buf(),
+                root: root.path().join(key(owner)),
                 host_id: host_id.into(),
             };
             host.publish(&source, &digest, &files).await.unwrap();
             host.compile(&source, &digest, &manifest).await.unwrap();
             let bytes = load_artifact(&host.artifact(&source, &digest)).unwrap();
             assert!(!bytes.is_empty());
+            let prepared = PreparedPlugin {
+                source: source.clone(),
+                manifest: manifest.clone(),
+                digest: digest.clone(),
+                host_id: host_id.into(),
+            };
+            let invocations = invocations::Invocations::default();
+            let ready = invocations
+                .start(
+                    &installer,
+                    owner,
+                    execution::InvokePlugin {
+                        prepared: prepared.clone(),
+                        name: "fixture_echo".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(ready.step, execution::PluginStep::Ready));
+            assert!(
+                invocations
+                    .cancel("another-owner", &ready.id)
+                    .await
+                    .is_err()
+            );
+            let callback = invocations
+                .resume(
+                    owner,
+                    execution::ContinuePlugin {
+                        id: ready.id.clone(),
+                        sequence: 0,
+                        response: Ok(String::new()),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                callback.step,
+                execution::PluginStep::HostCall { sequence: 1, .. }
+            ));
+            let response = execution::ContinuePlugin {
+                id: ready.id.clone(),
+                sequence: 1,
+                response: Ok("{\"value\":42}".into()),
+            };
+            assert!(
+                invocations
+                    .resume("another-owner", response.clone())
+                    .await
+                    .is_err()
+            );
+            let stale = execution::ContinuePlugin {
+                sequence: 0,
+                ..response.clone()
+            };
+            assert!(invocations.resume(owner, stale).await.is_err());
+            let result = invocations.resume(owner, response.clone()).await.unwrap();
+            assert!(matches!(
+                result.step,
+                execution::PluginStep::Complete { ok: true, .. }
+            ));
+            assert!(invocations.resume(owner, response).await.is_err());
+            let ready = invocations
+                .start(
+                    &installer,
+                    owner,
+                    execution::InvokePlugin {
+                        prepared,
+                        name: "fixture_echo".into(),
+                        arguments: "{}".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let callback = invocations
+                .resume(
+                    owner,
+                    execution::ContinuePlugin {
+                        id: ready.id.clone(),
+                        sequence: 0,
+                        response: Ok(String::new()),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                callback.step,
+                execution::PluginStep::HostCall { sequence: 1, .. }
+            ));
+            invocations.cancel(owner, &ready.id).await.unwrap();
+            assert!(
+                invocations
+                    .resume(
+                        owner,
+                        execution::ContinuePlugin {
+                            id: ready.id,
+                            sequence: 1,
+                            response: Ok("{}".into()),
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
         }
         let host = ScopedHost {
-            root: root.path().to_path_buf(),
+            root: root.path().join(key("user:1")),
             host_id: "server-host".into(),
         };
         std::fs::write(

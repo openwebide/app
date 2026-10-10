@@ -222,6 +222,8 @@ pub struct ExecutionEnvironment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunPlan {
     #[serde(default)]
+    pub plugin_executables: Vec<crate::plugins::PreparedPlugin>,
+    #[serde(default)]
     pub plugin_skills: Vec<crate::ProjectSkill>,
     /// Included only on shared-secret-authenticated native bridge responses.
     #[serde(default)]

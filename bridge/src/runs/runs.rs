@@ -181,6 +181,10 @@ pub struct StartRun {
     pub queued_prompt: Option<openwebide_core::QueuedPromptKey>,
     pub host_path: Option<String>,
 }
+pub(crate) struct RunHost {
+    pub execution: Arc<dyn crate::exec::ToolExecution>,
+    pub plugins: crate::plugins::transport::PluginExecutionHost,
+}
 
 impl RunRegistry {
     /// Selected once at the server/paired-companion capability boundary.
@@ -258,7 +262,10 @@ impl RunRegistry {
             workspace,
             backend,
             provider,
-            Arc::new(crate::exec::HostExecution),
+            RunHost {
+                execution: Arc::new(crate::exec::HostExecution),
+                plugins: crate::plugins::transport::PluginExecutionHost::default(),
+            },
         )
         .await
     }
@@ -305,7 +312,7 @@ impl RunRegistry {
         workspace: &Path,
         backend: Arc<B>,
         provider: F,
-        execution: Arc<dyn crate::exec::ToolExecution>,
+        host: RunHost,
     ) -> Result<Arc<Run>, (RunRejectCode, String)>
     where
         B: RunBackend + 'static,
@@ -452,7 +459,7 @@ impl RunRegistry {
                 plan,
                 dir,
                 message.id,
-                execution,
+                host,
             )
             .await;
             control.abort();
@@ -479,7 +486,7 @@ async fn run_body<B: RunBackend + 'static, P: LlmProvider + 'static>(
     mut plan: RunPlan,
     dir: Option<PathBuf>,
     anchor_id: i64,
-    execution: Arc<dyn crate::exec::ToolExecution>,
+    host: RunHost,
 ) {
     if plan.environment.timestamp == 0 {
         plan.environment.timestamp = i64::try_from(now()).unwrap_or(i64::MAX);
@@ -555,10 +562,12 @@ async fn run_body<B: RunBackend + 'static, P: LlmProvider + 'static>(
                 run: run.clone(),
                 backend: backend.clone(),
                 dir,
-                execution,
+                execution: host.execution,
                 anchor: anchor_id,
                 environment: plan.environment.clone(),
                 plugin_skills: Arc::new(plan.plugin_skills.clone()),
+                plugin_executables: Arc::new(plan.plugin_executables.clone()),
+                plugin_transport: host.plugins.transport(run.owner),
                 primary: openwebide_core::ModelRuntime {
                     connection: plan.connection.clone(),
                     transport: plan.transport.clone(),
@@ -857,11 +866,38 @@ impl<B: RunBackend> openwebide_agent::skills::SkillStore for BridgeSkillPersiste
         .await
     }
 }
-type BridgeBaseTaskExecutor<B> =
+type BridgeBuiltinTaskExecutor<B> =
     openwebide_agent::skills::SkillTools<BridgeScheduledExecutor<B>, BridgeSkillPersistence<B>>;
-type BridgeTaskGate<B> =
-    openwebide_agent::policy::PolicyGate<BridgeGate, super::backend_client::ApprovalAdapter<B>>;
+type BridgeBaseTaskExecutor<B> = openwebide_agent::plugins::execution::PluginTools<
+    BridgeBuiltinTaskExecutor<B>,
+    crate::plugins::transport::NativePluginTransport,
+    BridgePluginServices<B>,
+>;
+struct BridgePluginServices<B> {
+    backend: Arc<B>,
+    user: i64,
+    session: i64,
+}
+impl<B: RunBackend> openwebide_agent::plugins::execution::PluginServices
+    for BridgePluginServices<B>
+{
+    async fn request(
+        &self,
+        plugin: &openwebide_core::plugins::PreparedPlugin,
+        capability: &str,
+        payload: &str,
+    ) -> Result<String, String> {
+        self.backend
+            .plugin_request(self.user, self.session, plugin, capability, payload)
+            .await
+    }
+}
+type BridgeTaskGate<B> = openwebide_agent::plugins::execution::PluginGate<
+    openwebide_agent::policy::PolicyGate<BridgeGate, super::backend_client::ApprovalAdapter<B>>,
+>;
 struct BridgeTaskFactory<B> {
+    plugin_executables: Arc<Vec<openwebide_core::plugins::PreparedPlugin>>,
+    plugin_transport: crate::plugins::transport::NativePluginTransport,
     plugin_skills: Arc<Vec<openwebide_core::ProjectSkill>>,
     run: Arc<Run>,
     backend: Arc<B>,
@@ -874,6 +910,8 @@ struct BridgeTaskFactory<B> {
 impl<B> Clone for BridgeTaskFactory<B> {
     fn clone(&self) -> Self {
         Self {
+            plugin_executables: self.plugin_executables.clone(),
+            plugin_transport: self.plugin_transport.clone(),
             plugin_skills: self.plugin_skills.clone(),
             run: self.run.clone(),
             backend: self.backend.clone(),
@@ -898,6 +936,18 @@ impl<B: RunBackend + 'static> BridgeTaskFactory<B> {
         )
     }
     fn base_executor(&self) -> BridgeBaseTaskExecutor<B> {
+        openwebide_agent::plugins::execution::PluginTools {
+            executor: self.builtin_executor(),
+            transport: self.plugin_transport.clone(),
+            services: BridgePluginServices {
+                backend: self.backend.clone(),
+                user: self.run.owner,
+                session: self.run.session_id,
+            },
+            plugins: self.plugin_executables.clone(),
+        }
+    }
+    fn builtin_executor(&self) -> BridgeBuiltinTaskExecutor<B> {
         let workspace = self.dir.as_ref().map(|dir| {
             VfsToolExecutor::with_web_and_bridge(
                 NativeFsVfs { root: dir.clone() },
@@ -961,14 +1011,17 @@ impl<B: RunBackend + 'static> BridgeTaskFactory<B> {
         )
     }
     fn gate(&self, request: &openwebide_core::ChatRequest) -> BridgeTaskGate<B> {
-        openwebide_agent::policy::PolicyGate {
-            manual: self.run.gate.clone(),
-            source: super::backend_client::ApprovalAdapter {
-                backend: self.backend.clone(),
-                user: self.run.owner,
-                session: self.run.session_id,
-                connection_id: request.connection_id,
-                model: request.model.clone(),
+        openwebide_agent::plugins::execution::PluginGate {
+            plugins: self.plugin_executables.clone(),
+            gate: openwebide_agent::policy::PolicyGate {
+                manual: self.run.gate.clone(),
+                source: super::backend_client::ApprovalAdapter {
+                    backend: self.backend.clone(),
+                    user: self.run.owner,
+                    session: self.run.session_id,
+                    connection_id: request.connection_id,
+                    model: request.model.clone(),
+                },
             },
         }
     }

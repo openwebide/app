@@ -469,7 +469,13 @@ impl Connection {
                             memo,
                         )
                     },
-                    config.execution.clone(),
+                    crate::runs::RunHost {
+                        execution: config.execution.clone(),
+                        plugins: crate::plugins::transport::PluginExecutionHost {
+                            installer: config.plugins.clone(),
+                            invocations: config.plugin_invocations.clone(),
+                        },
+                    },
                 )
                 .await
             {

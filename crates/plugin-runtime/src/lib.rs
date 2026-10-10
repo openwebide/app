@@ -1,5 +1,6 @@
 //! Host component runtime; every plugin uses the same imports and limits.
 pub mod build;
+pub use openwebide_plugin_sdk as sdk;
 
 use anyhow::{Context, Result, bail};
 use openwebide_plugin_sdk::{Outcome, Tool};
@@ -9,7 +10,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({path: "../plugin-sdk/wit", world: "plugin"});
 
-pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const CAPABILITIES: &[&str] = &["http", "records", "jobs", "workspace", "clock"];
 
 /// Adapters implement general primitives, never feature-specific dispatch.

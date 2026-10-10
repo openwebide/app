@@ -580,6 +580,15 @@ pub trait Backend {
     ) -> LocalBoxFuture<'a, Result<openwebide_core::plugins::PluginPackage, String>> {
         Box::pin(async { Err("Plugin management unavailable".into()) })
     }
+    fn plugin_host_request<'a>(
+        &'a self,
+        _session: i64,
+        _plugin: &'a openwebide_core::plugins::PreparedPlugin,
+        _capability: &'a str,
+        _payload: &'a str,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
+        Box::pin(async { Err("Plugin host capability unavailable".into()) })
+    }
     fn plugin_installations(
         &self,
     ) -> LocalBoxFuture<'_, Result<Vec<openwebide_core::plugins::PluginInstallation>, String>> {

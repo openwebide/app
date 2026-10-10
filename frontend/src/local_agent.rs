@@ -324,6 +324,37 @@ impl BrowserBridgeClient {
     pub fn cwd(&self) -> &str {
         &self.cwd
     }
+    async fn plugin_request<T: serde::de::DeserializeOwned>(
+        &self,
+        operation: &str,
+        payload: serde_json::Value,
+    ) -> Result<T, String> {
+        if operation != "cancel" && !self.cwd_verified() {
+            return Err("Reconnect this project's execution host first.".into());
+        }
+        let token = self.credentials.credential().await?;
+        let guard = crate::api::CommandFetchGuard(
+            web_sys::AbortController::new().map_err(|error| format!("{error:?}"))?,
+        );
+        let response =
+            gloo_net::http::Request::post(&format!("{}/plugins/{operation}", self.http_url))
+                .abort_signal(Some(&guard.0.signal()))
+                .header("Content-Type", "application/json")
+                .header("Authorization", &format!("Bearer {token}"))
+                .body(payload.to_string())
+                .map_err(|error| error.to_string())?
+                .send()
+                .await
+                .map_err(|error| format!("Plugin host unavailable: {error}"))?;
+        if !response.ok() {
+            return Err(format!(
+                "Plugin host HTTP {}: {}",
+                response.status(),
+                response.text().await.unwrap_or_default()
+            ));
+        }
+        response.json().await.map_err(|error| error.to_string())
+    }
     pub async fn prepare_plugin(
         &self,
         source: &openwebide_core::plugins::PluginSource,
@@ -935,6 +966,10 @@ pub async fn run_local_agent(
         },
     );
     let mut plan = openwebide_agent::session::plan(&runtime, input);
+    plan.plugin_executables = openwebide_agent::plugins::execution::configure_tools(
+        &mut plan.request.tools,
+        &plugin_bindings,
+    )?;
     plan.plugin_skills = openwebide_agent::skills::package_snapshot(&skills);
     if !current() {
         return Err("Project access changed".into());
@@ -1053,6 +1088,7 @@ pub async fn run_local_agent(
         });
         let factory = BrowserTaskFactory {
             plugin_skills: Arc::new(plan.plugin_skills),
+            plugin_executables: Arc::new(plan.plugin_executables),
             api: SendWrapper::new(api),
             vfs,
             bridge,
@@ -1314,11 +1350,78 @@ impl openwebide_agent::skills::SkillStore for BrowserSkillPersistence {
     }
 }
 
-type BrowserBaseTaskExecutor =
+type BrowserBuiltinTaskExecutor =
     openwebide_agent::skills::SkillTools<BrowserScheduledExecutor, BrowserSkillPersistence>;
-type BrowserTaskGate = openwebide_agent::policy::PolicyGate<LocalPermissionGate, ApprovalAdapter>;
+type BrowserBaseTaskExecutor = openwebide_agent::plugins::execution::PluginTools<
+    BrowserBuiltinTaskExecutor,
+    BrowserPluginTransport,
+    BrowserPluginServices,
+>;
+#[derive(Clone)]
+struct BrowserPluginTransport(Option<BrowserBridgeClient>);
+impl openwebide_agent::plugins::execution::PluginTransport for BrowserPluginTransport {
+    async fn start(
+        &self,
+        call: openwebide_core::plugins::execution::InvokePlugin,
+    ) -> Result<openwebide_core::plugins::execution::PluginInvocation, String> {
+        SendWrapper::new(async move {
+            self.0
+                .as_ref()
+                .ok_or("Connect this project's execution host first.")?
+                .plugin_request("invoke", serde_json::json!({"call":call}))
+                .await
+        })
+        .await
+    }
+    async fn resume(
+        &self,
+        continuation: openwebide_core::plugins::execution::ContinuePlugin,
+    ) -> Result<openwebide_core::plugins::execution::PluginInvocation, String> {
+        SendWrapper::new(async move {
+            self.0
+                .as_ref()
+                .ok_or("Connect this project's execution host first.")?
+                .plugin_request("continue", serde_json::json!({"continuation":continuation}))
+                .await
+        })
+        .await
+    }
+    fn cancel(&self, id: String) {
+        if let Some(client) = self.0.clone() {
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = client
+                    .plugin_request::<serde_json::Value>("cancel", serde_json::json!({"id":id}))
+                    .await;
+            });
+        }
+    }
+}
+struct BrowserPluginServices {
+    api: SendWrapper<Api>,
+    session: i64,
+}
+impl openwebide_agent::plugins::execution::PluginServices for BrowserPluginServices {
+    async fn request(
+        &self,
+        plugin: &openwebide_core::plugins::PreparedPlugin,
+        capability: &str,
+        payload: &str,
+    ) -> Result<String, String> {
+        SendWrapper::new(async move {
+            self.api
+                .with_value(Clone::clone)
+                .plugin_host_request(self.session, plugin, capability, payload)
+                .await
+        })
+        .await
+    }
+}
+type BrowserTaskGate = openwebide_agent::plugins::execution::PluginGate<
+    openwebide_agent::policy::PolicyGate<LocalPermissionGate, ApprovalAdapter>,
+>;
 #[derive(Clone)]
 struct BrowserTaskFactory {
+    plugin_executables: Arc<Vec<openwebide_core::plugins::PreparedPlugin>>,
     plugin_skills: Arc<Vec<openwebide_core::ProjectSkill>>,
     api: SendWrapper<Api>,
     vfs: BrowserFsaVfs,
@@ -1341,6 +1444,17 @@ impl BrowserTaskFactory {
         )
     }
     fn base_executor(&self) -> BrowserBaseTaskExecutor {
+        openwebide_agent::plugins::execution::PluginTools {
+            executor: self.builtin_executor(),
+            transport: BrowserPluginTransport(self.bridge.clone()),
+            services: BrowserPluginServices {
+                api: self.api.clone(),
+                session: self.session,
+            },
+            plugins: self.plugin_executables.clone(),
+        }
+    }
+    fn builtin_executor(&self) -> BrowserBuiltinTaskExecutor {
         openwebide_agent::skills::SkillTools::new(
             openwebide_agent::scheduled::ScheduledTools::new(
                 openwebide_agent::memory::MemoryTools::new(
@@ -1375,13 +1489,16 @@ impl BrowserTaskFactory {
         )
     }
     fn gate(&self, request: &ChatRequest) -> BrowserTaskGate {
-        openwebide_agent::policy::PolicyGate {
-            manual: self.manual.clone(),
-            source: ApprovalAdapter {
-                api: self.api.clone(),
-                session: self.session,
-                connection_id: request.connection_id,
-                model: request.model.clone(),
+        openwebide_agent::plugins::execution::PluginGate {
+            plugins: self.plugin_executables.clone(),
+            gate: openwebide_agent::policy::PolicyGate {
+                manual: self.manual.clone(),
+                source: ApprovalAdapter {
+                    api: self.api.clone(),
+                    session: self.session,
+                    connection_id: request.connection_id,
+                    model: request.model.clone(),
+                },
             },
         }
     }

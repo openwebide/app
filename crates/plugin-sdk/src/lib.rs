@@ -6,6 +6,37 @@ pub mod bindings {
 use serde::{Deserialize, Serialize};
 pub use serde_json;
 
+/// General HTTP transport. Bodies use base64 so binary data stays portable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpRequest {
+    pub url: String,
+    pub method: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub body_base64: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub body_base64: String,
+}
+impl HttpResponse {
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(&self.body_base64)
+            .map_err(|error| error.to_string())
+    }
+    pub fn text(&self) -> Result<String, String> {
+        String::from_utf8(self.bytes()?).map_err(|error| error.to_string())
+    }
+}
+pub fn http(request: &HttpRequest) -> Result<HttpResponse, String> {
+    self::request("http", request)
+}
+
 /// The host independently validates names, schemas and requested capabilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

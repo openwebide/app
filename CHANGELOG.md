@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add Rust plugin SDK and isolated source-to-WASM preparation foundations, with a shared executable-tool workflow for server and paired hosts. General persistence/job capabilities, first-party behavior migration and offline executable defaults remain unfinished.
+
 - Retry transient Chrome/ChromeDriver setup failures up to three times in both frontend CI jobs, requiring executable browser and driver paths before testing.
 
 - Retain partial wrapped-paragraph coverage through the shared editor facade with current source, ticket, syntax, file, project, account, font and layout ownership. Reuse immutable anchors and hide coverage during composition; browser publication remains unfinished.

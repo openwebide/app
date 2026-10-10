@@ -238,6 +238,7 @@ fn plan(kind: RunKind, content: &str) -> RunPlan {
         tools.push(openwebide_agent::tasks::executor::definition());
     }
     RunPlan {
+        plugin_executables: Vec::new(),
         plugin_skills: Vec::new(),
         transport: Default::default(),
         environment: openwebide_core::RunEnvironment::default(),
@@ -396,7 +397,10 @@ async fn buffered_start_cancel_survives_delayed_start_task() {
                             |_| -> FakeProvider {
                                 panic!("cancelled start must not call the model")
                             },
-                            Arc::new(crate::exec::HostExecution),
+                            RunHost {
+                                execution: Arc::new(crate::exec::HostExecution),
+                                plugins: crate::plugins::transport::PluginExecutionHost::default(),
+                            },
                         )
                         .await
                         .unwrap()
@@ -1355,7 +1359,13 @@ async fn http_and_agent_run_use_configured_execution() {
             &config.workspace_root,
             backend,
             |_| provider,
-            config.execution.clone(),
+            RunHost {
+                execution: config.execution.clone(),
+                plugins: crate::plugins::transport::PluginExecutionHost {
+                    installer: config.plugins.clone(),
+                    invocations: config.plugin_invocations.clone(),
+                },
+            },
         )
         .await
         .unwrap();
