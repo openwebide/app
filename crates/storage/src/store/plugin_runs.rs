@@ -188,7 +188,7 @@ impl<D: Db> Store<D> {
                 ]);
                 let inserted = self.db.execute("INSERT INTO plugin_runs(user_id,project_scope,plugin,run_key,request,prepared,context,host_id,session_id,queued_id,model,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", &params).await?.last_insert_rowid;
                 if let Some(completion) = completion {
-                    let count = self.db.execute("SELECT count(*) FROM plugin_jobs WHERE user_id=? AND project_scope=? AND plugin=?", &scope).await?.rows[0].get_int(0)?;
+                    let count = self.db.execute("SELECT count(*) FROM plugin_jobs WHERE user_id=? AND project_scope=? AND plugin=? AND background_id IS NULL", &scope).await?.rows[0].get_int(0)?;
                     if count >= openwebide_core::plugins::jobs::MAX_JOBS {
                         return Err(StorageError::Conflict("Plugin event queue is full; delete terminal events before submitting a completion callback".into()));
                     }

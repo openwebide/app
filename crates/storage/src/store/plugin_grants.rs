@@ -114,7 +114,7 @@ impl<D: Db> Store<D> {
         }
         if let Some(job) = row.get_int_opt(5) {
             let lease = row.get_text(6)?;
-            let current = self.db.execute("SELECT 1 FROM plugin_jobs WHERE id=? AND user_id=? AND state='leased' AND lease=? AND lease_expires_at>?", &[DbValue::Int(job),DbValue::Int(user.get()),DbValue::Text(lease.into()),DbValue::Int(now)]).await?;
+            let current = self.db.execute("SELECT 1 FROM plugin_jobs WHERE id=? AND user_id=? AND state='leased' AND lease=? AND lease_expires_at>? AND (background_id IS NULL OR EXISTS(SELECT 1 FROM plugin_background b WHERE b.id=plugin_jobs.background_id AND b.prepared=plugin_jobs.prepared))", &[DbValue::Int(job),DbValue::Int(user.get()),DbValue::Text(lease.into()),DbValue::Int(now)]).await?;
             if current.rows.is_empty() {
                 return Err(StorageError::Conflict(
                     "Job lease is no longer current".into(),
@@ -308,6 +308,14 @@ impl<D: Db> Store<D> {
                             .await?;
                         let command = serde_json::from_str(&request.payload)
                             .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                        if let openwebide_core::plugins::jobs::JobRequest::Schedule { key, .. } =
+                            &command
+                            && key.starts_with("background:")
+                        {
+                            return Err(StorageError::InvalidRequest(
+                                "Background job keys are reserved for host delivery".into(),
+                            ));
+                        }
                         let result = store
                             .plugin_jobs_in_transaction(user, &plugin, &context, &command, now)
                             .await?;

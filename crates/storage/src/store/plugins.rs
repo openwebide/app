@@ -80,6 +80,21 @@ impl<D: Db> Store<D> {
                 )
                 .await?;
         }
+        let installation = next
+            .iter()
+            .find(|entry| {
+                entry.prepared.source.repository == request.prepared.source.repository
+                    && entry.prepared.source.path == request.prepared.source.path
+            })
+            .ok_or_else(|| StorageError::Conflict("Plugin installation changed".into()))?;
+        self.sync_plugin_background(
+            user,
+            None,
+            &installation.prepared,
+            installation.default_enabled,
+            now,
+        )
+        .await?;
         self.acknowledge_bundled_plugin(user, &request.prepared.source)
             .await?;
         Ok(next)
@@ -488,7 +503,18 @@ impl<D: Db> Store<D> {
                     .await?;
             }
         }
-        self.project_plugins(user, project).await
+        let bindings = self.project_plugins(user, project).await?;
+        for binding in &bindings {
+            self.sync_plugin_background(
+                user,
+                Some(project),
+                &binding.prepared,
+                binding.enabled,
+                now,
+            )
+            .await?;
+        }
+        Ok(bindings)
     }
     pub(super) async fn inherit_plugin_defaults(
         &self,
@@ -565,6 +591,7 @@ impl<D: Db> Store<D> {
             store.db.execute("DELETE FROM project_skills WHERE id IN (SELECT s.skill_id FROM project_plugin_skills s JOIN project_plugins p ON p.id=s.plugin_id WHERE p.user_id=? AND p.repository=? AND p.path=?)",&scope).await?;
             store.db.execute("DELETE FROM project_plugins WHERE user_id=? AND repository=? AND path=?",&scope).await?;
             store.db.execute("DELETE FROM plugin_defaults WHERE user_id=? AND repository=? AND path=?",&scope).await?;
+            store.db.execute("DELETE FROM plugin_background WHERE user_id=? AND plugin=?", &[DbValue::Int(user.get()),DbValue::Text(entry.prepared.storage_namespace())]).await?;
             store.acknowledge_bundled_plugin(user, &request.source).await?;
             entries.retain(|entry|entry.prepared.source.repository!=request.source.repository || entry.prepared.source.path!=request.source.path);
             store.set_user_setting(user,KEY,&serde_json::to_string(&entries).map_err(|error|StorageError::Db(error.to_string()))?).await?;

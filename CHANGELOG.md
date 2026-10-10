@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Deliver declared periodic plugin background events through the shared leased queue on both host modes, using current enabled source bindings and sessionless grants. Preserve deadlines across restarts, revoke replaced background actors and reserve recovery capacity even when the user job queue is full. The unlisted Scheduling source repairs interrupted timers, run bookkeeping, deletion and source-version handoffs; retention, UI mutations and deployment remain in progress.
+
 - Project SDK raw-run progress into existing task history through scoped immutable bindings. Preserve legacy history IDs and final snapshots after raw-run cleanup; Scheduling source records bindings through the public SDK. UI mutations, lifecycle recovery and deployment remain in progress.
 
 - Expose current account model preferences and shared public server metadata through read-only SDK collections, without choosing models or exporting endpoints. The unlisted Scheduling Rust source now owns CRUD, due delivery, recurrence, cancellation and monitor-result handlers; lifecycle recovery, UI mutation integration and deployment remain in progress.

@@ -108,6 +108,8 @@ pub struct PluginCompatibility {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginContributions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<PluginBackground>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -116,6 +118,14 @@ pub struct PluginContributions {
     pub tool_groups: Vec<PluginToolGroup>,
     #[serde(default)]
     pub skills: Vec<PluginSkill>,
+}
+/// Periodic, project-scoped reconciliation through the ordinary durable event queue.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginBackground {
+    pub event: String,
+    #[serde(rename = "intervalSeconds")]
+    pub interval_seconds: i64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,6 +238,16 @@ impl PluginManifest {
         {
             return Err(invalid(
                 "Host events require a Rust executable and unique supported event names.",
+            ));
+        }
+        if let Some(background) = &self.contributions.background
+            && (!(60..=86400).contains(&background.interval_seconds)
+                || !self.contributions.events.contains(&background.event)
+                || !executable
+                    .is_some_and(|rust| rust.capabilities.iter().any(|name| name == "jobs")))
+        {
+            return Err(invalid(
+                "Background events require a declared event, jobs capability and an interval of 60–86,400 seconds.",
             ));
         }
         if executable.is_some() != (self.compatibility.plugin_api == 3)
@@ -867,6 +887,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn background_events_require_declared_jobs_authority_and_bounded_intervals() {
+        let mut manifest = testing::receipt().manifest;
+        manifest.compatibility.plugin_api = 3;
+        manifest.contributions.skills.clear();
+        manifest.contributions.events = vec!["repair".into()];
+        manifest.executable = Some(RustPlugin {
+            manifest: "Cargo.toml".into(),
+            library: "background".into(),
+            sdk_version: "0.1.0".into(),
+            capabilities: vec!["jobs".into()],
+        });
+        manifest.contributions.background = Some(PluginBackground {
+            event: "repair".into(),
+            interval_seconds: 60,
+        });
+        manifest.validate().unwrap();
+        for interval in [0, 59, 86401, i64::MAX] {
+            manifest
+                .contributions
+                .background
+                .as_mut()
+                .unwrap()
+                .interval_seconds = interval;
+            assert!(manifest.validate().is_err());
+        }
+        manifest
+            .contributions
+            .background
+            .as_mut()
+            .unwrap()
+            .interval_seconds = 86400;
+        manifest.validate().unwrap();
+        manifest.contributions.background.as_mut().unwrap().event = "undeclared".into();
+        assert!(manifest.validate().is_err());
+        manifest.contributions.background.as_mut().unwrap().event = "repair".into();
+        manifest.executable.as_mut().unwrap().capabilities.clear();
+        assert!(manifest.validate().is_err());
+    }
     #[test]
     fn executable_event_contributions_do_not_require_model_tools() {
         let mut manifest = testing::receipt().manifest;

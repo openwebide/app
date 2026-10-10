@@ -139,6 +139,327 @@ impl Fixture {
 }
 
 #[test]
+fn background_batches_inherit_new_projects_and_recovery_is_not_blocked_by_full_user_queue() {
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let mut f = Fixture::new(mode).await;
+            f.prepared.source.commit = "2".repeat(40);
+            f.prepared.manifest.version = "0.2.0".into();
+            f.prepared.manifest.contributions.background =
+                Some(openwebide_core::plugins::PluginBackground {
+                    event: "due".into(),
+                    interval_seconds: 60,
+                });
+            f.install(Some(1)).await;
+            for index in 0..10 {
+                f.store
+                    .create_project(
+                        &NewProject {
+                            name: format!("new-{index}"),
+                            mode,
+                            path: None,
+                        },
+                        f.user,
+                        1,
+                    )
+                    .await
+                    .unwrap();
+            }
+            // A source with a full user queue must still be able to reconcile and clean it.
+            let prepared = encode(&f.prepared).unwrap();
+            let context = encode(&f.context).unwrap();
+            for index in 0..MAX_JOBS {
+                f.store.db.execute("INSERT INTO plugin_jobs(user_id,project_scope,plugin,job_key,due_at,event,payload,prepared,context,host_id) VALUES(?,?,?,?,1000,'due','null',?,?,?)",&[DbValue::Int(f.user.get()),DbValue::Int(f.project),DbValue::Text(f.prepared.storage_namespace()),DbValue::Text(format!("quota:{index}")),DbValue::Text(prepared.clone()),DbValue::Text(context.clone()),DbValue::Text(f.prepared.host_id.clone())]).await.unwrap();
+            }
+            let first = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"b".repeat(32), 2)
+                .await
+                .unwrap();
+            let second = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"c".repeat(32), 2)
+                .await
+                .unwrap();
+            assert_eq!(first.jobs.len(), 8);
+            assert_eq!(second.jobs.len(), 4);
+            let scopes = first
+                .jobs
+                .iter()
+                .chain(&second.jobs)
+                .map(|job| job.context.project_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(scopes.len(), 12);
+            assert!(scopes.contains(&Some(f.project)) && scopes.contains(&None));
+            assert!(
+                f.request(&Fixture::scheduled("queue-still-full"), 2)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                f.store
+                    .claim_plugin_jobs(&f.prepared.host_id, 0, &"d".repeat(32), 3)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .is_empty()
+            );
+        }
+    });
+}
+
+#[test]
+fn overdue_jobs_are_deliverable_without_changing_source_time_policy() {
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let mut command = Fixture::scheduled("overdue");
+            if let JobRequest::Schedule { due_at, .. } = &mut command {
+                *due_at = 1;
+            }
+            let scheduled = f.request(&command, 20).await.unwrap().jobs.remove(0);
+            let claimed = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"b".repeat(32), 20)
+                .await
+                .unwrap();
+            assert_eq!(claimed.jobs.len(), 1);
+            assert_eq!(claimed.jobs[0].job.id, scheduled.id);
+            assert_eq!(claimed.jobs[0].job.due_at, 1);
+        }
+    });
+}
+
+#[test]
+fn background_events_follow_current_bindings_recover_and_stop_without_extra_authority() {
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let mut f = Fixture::new(mode).await;
+            f.prepared.source.commit = "2".repeat(40);
+            f.prepared.manifest.version = "0.2.0".into();
+            f.prepared.manifest.contributions.background =
+                Some(openwebide_core::plugins::PluginBackground {
+                    event: "due".into(),
+                    interval_seconds: 60,
+                });
+            f.install(Some(1)).await;
+            let ordinary = f
+                .request(&Fixture::scheduled("user-owned-history"), 2)
+                .await
+                .unwrap()
+                .jobs
+                .remove(0);
+            assert!(
+                f.request(
+                    &JobRequest::Schedule {
+                        scope: JobScope::Project,
+                        key: "background:1:2".into(),
+                        due_at: 2,
+                        expires_at: None,
+                        event: "due".into(),
+                        payload: json!(null)
+                    },
+                    2
+                )
+                .await
+                .is_err()
+            );
+            assert!(
+                f.store
+                    .claim_plugin_jobs("other-host", 0, &"b".repeat(32), 2)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .is_empty()
+            );
+            let claims = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"b".repeat(32), 2)
+                .await
+                .unwrap();
+            assert_eq!(claims.jobs.len(), 2); // account-global and project-scoped subscriptions
+            let project = claims
+                .jobs
+                .iter()
+                .find(|job| job.context.project_id == Some(f.project))
+                .unwrap();
+            assert_eq!(project.prepared.source, f.prepared.source);
+            assert!(
+                project.context.session_id.is_none()
+                    && project.context.primary.is_none()
+                    && !project.context.user_action
+            );
+            assert!(project.job.payload.is_null());
+            f.store
+                .issue_plugin_job_grant(
+                    f.user,
+                    &f.prepared.host_id,
+                    project.job.id,
+                    &project.lease,
+                    &"c".repeat(32),
+                    2,
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .issue_plugin_job_grant(
+                        f.other,
+                        &f.prepared.host_id,
+                        project.job.id,
+                        &project.lease,
+                        &"d".repeat(32),
+                        2
+                    )
+                    .await
+                    .is_err()
+            );
+            let callback = PluginHostRequest {
+                grant: "c".repeat(32),
+                capability: "records".into(),
+                payload:
+                    json!({"collection":"state","operation":{"action":"create","value":"repair"}})
+                        .to_string(),
+            };
+            f.store
+                .plugin_context_host_request(f.user, &callback, 2)
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .claim_plugin_jobs(&f.prepared.host_id, 0, &"d".repeat(32), 3)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .is_empty()
+            );
+            // Updating revokes pending background actors, while a user-scheduled job retains its pin.
+            f.prepared.source.commit = "3".repeat(40);
+            f.prepared.manifest.version = "0.3.0".into();
+            let revision = f.store.plugin_installations(f.user).await.unwrap()[0].revision;
+            f.install(Some(revision)).await;
+            assert!(
+                f.store
+                    .plugin_context_host_request(f.user, &callback, 3)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                f.store
+                    .renew_plugin_job(&f.prepared.host_id, project.job.id, &project.lease, 3)
+                    .await
+                    .is_err()
+            );
+            let updated = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"e".repeat(32), 20)
+                .await
+                .unwrap();
+            assert_eq!(updated.jobs.len(), 3);
+            assert!(
+                updated
+                    .jobs
+                    .iter()
+                    .filter(|job| job.job.key.starts_with("background:"))
+                    .all(|job| job.prepared.source == f.prepared.source)
+            );
+            assert!(updated.jobs.iter().any(
+                |job| job.job.id == ordinary.id && job.prepared.source.commit == "a".repeat(40)
+            ));
+            for job in &updated.jobs {
+                f.store
+                    .finish_plugin_job(
+                        &f.prepared.host_id,
+                        job.job.id,
+                        &job.lease,
+                        true,
+                        "done",
+                        20,
+                    )
+                    .await
+                    .unwrap();
+            }
+            // A persisted deadline prevents duplicate ticks after reopen/replay, then recurs normally.
+            f.store
+                .db
+                .execute("PRAGMA user_version=55", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            assert!(
+                f.store
+                    .claim_plugin_jobs(&f.prepared.host_id, 0, &"f".repeat(32), 21)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .is_empty()
+            );
+            let recurring = f
+                .store
+                .claim_plugin_jobs(&f.prepared.host_id, 0, &"f".repeat(32), 80)
+                .await
+                .unwrap();
+            assert_eq!(recurring.jobs.len(), 2);
+            let binding = f
+                .store
+                .project_plugins(f.user, f.project)
+                .await
+                .unwrap()
+                .remove(0);
+            f.store
+                .project_plugin_command(
+                    f.user,
+                    f.project,
+                    &ProjectPluginCommand::Disable {
+                        id: binding.id,
+                        revision: binding.revision,
+                    },
+                    81,
+                )
+                .await
+                .unwrap();
+            let current = f
+                .store
+                .plugin_installations(f.user)
+                .await
+                .unwrap()
+                .remove(0);
+            f.store
+                .remove_plugin(
+                    f.user,
+                    &openwebide_core::plugins::RemovePlugin {
+                        source: current.prepared.source,
+                        revision: current.revision,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .claim_plugin_jobs(&f.prepared.host_id, 0, &"a".repeat(32), 200)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .is_empty()
+            );
+            assert!(
+                f.store
+                    .issue_plugin_job_grant(
+                        f.user,
+                        &f.prepared.host_id,
+                        recurring.jobs[0].job.id,
+                        &recurring.jobs[0].lease,
+                        &"a".repeat(32),
+                        81
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
 fn jobs_are_owned_idempotent_version_pinned_and_leased_in_both_modes() {
     block_on(async {
         for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
@@ -810,7 +1131,7 @@ fn persisted_jobs_recover_after_database_reopen_and_invalid_requests_do_not_enqu
             for payload in [
                 json!({"action":"schedule","key":"forged","due_at":20,"expires_at":null,"event":"due","payload":null,"user_id":fixture.other.get()}),
                 json!({"action":"schedule","key":"unknown","due_at":20,"expires_at":null,"event":"undeclared","payload":null}),
-                json!({"action":"schedule","key":"past","due_at":1,"expires_at":null,"event":"due","payload":null}),
+                json!({"action":"schedule","key":"negative","due_at":-1,"expires_at":null,"event":"due","payload":null}),
                 json!({"action":"schedule","key":"empty-window","due_at":20,"expires_at":20,"event":"due","payload":null}),
                 json!({"action":"grant","user_id":fixture.user.get()}),
                 json!({"action":"schedule","key":"large","due_at":20,"expires_at":null,"event":"due","payload":"x".repeat(65536)}),

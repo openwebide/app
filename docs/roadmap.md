@@ -403,9 +403,11 @@ capability.
   renewable leases and scoped callback authority. Task collection CRUD preserves
   existing IDs/history and excludes plugin-owned records from legacy dispatch;
   record prerequisites atomically reject stale new prompt submissions. Scoped history
-  bindings project raw-run progress and retain terminal snapshots after cleanup. Finish
-  source-owned task/monitor lifecycle recovery, UI mutation integration, retention
-  and cancellation failure handling,
+  bindings project raw-run progress and retain terminal snapshots after cleanup.
+  Declared background events now drive source-owned timer/run/deletion repair and
+  source-version handoff, through current enabled bindings in both host modes. Finish
+  source-owned retention and preflight failure reporting, UI mutation integration
+  and complete cancellation/recovery verification,
   then activate the executable release. Route remaining UI and
   background invocations through the sessionless execution-context API; Memory
   mutations already use shared guarded actions.

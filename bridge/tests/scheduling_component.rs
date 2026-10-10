@@ -26,16 +26,18 @@ impl HostServices for Services {
         match capability {
             "clock" => Ok(json!({"unix_seconds":self.clock.load(Ordering::Relaxed)}).to_string()),
             "completion" => Err("No model completion in this data-contract fixture".into()),
-            "collections" | "jobs" | "runs" => block_on(self.store.plugin_context_host_request(
-                self.user,
-                &PluginHostRequest {
-                    grant: self.grant.clone(),
-                    capability: capability.into(),
-                    payload: payload.into(),
-                },
-                self.clock.load(Ordering::Relaxed),
-            ))
-            .map_err(|error| error.to_string()),
+            "collections" | "records" | "jobs" | "runs" => {
+                block_on(self.store.plugin_context_host_request(
+                    self.user,
+                    &PluginHostRequest {
+                        grant: self.grant.clone(),
+                        capability: capability.into(),
+                        payload: payload.into(),
+                    },
+                    self.clock.load(Ordering::Relaxed),
+                ))
+                .map_err(|error| error.to_string())
+            }
             _ => panic!("Scheduling tried to use a non-declared feature primitive: {capability}"),
         }
     }
@@ -163,6 +165,72 @@ fn scheduling_component_uses_shared_records_events_and_raw_runs_in_both_modes() 
             block_on(store.scheduled_tasks(user, Some(project), 100)).unwrap()[0].id,
             task
         );
+        // Simulate a dropped actor after saving a task but before its timer is durable.
+        let mut repair = services.clone();
+        let jobs: Value = serde_json::from_str(
+            &repair
+                .request("jobs", &json!({"action":"list","after":0}).to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let timer = jobs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["event"] == "task_due")
+            .unwrap();
+        let cancelled: Value = serde_json::from_str(
+            &repair
+                .request(
+                    "jobs",
+                    &json!({"action":"cancel","id":timer["id"],"revision":timer["revision"]})
+                        .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        repair.request("jobs", &json!({"action":"delete","id":timer["id"],"revision":cancelled["jobs"][0]["revision"]}).to_string()).unwrap();
+        // Execute the host-declared project reconciliation event through its real scoped grant.
+        let ticks = block_on(store.claim_plugin_jobs("host", 0, &"f".repeat(32), 100)).unwrap();
+        let tick = ticks
+            .jobs
+            .iter()
+            .find(|job| job.context.project_id == Some(project))
+            .unwrap();
+        assert_eq!(tick.job.event, "reconcile");
+        block_on(store.issue_plugin_job_grant(
+            user,
+            "host",
+            tick.job.id,
+            &tick.lease,
+            &"9".repeat(32),
+            100,
+        ))
+        .unwrap();
+        let reconciled = runtime
+            .event(
+                &bytes,
+                Services {
+                    grant: "9".repeat(32),
+                    ..services.clone()
+                },
+                capabilities,
+                EventInput {
+                    name: tick.job.event.clone(),
+                    payload: tick.job.payload.clone(),
+                },
+            )
+            .unwrap();
+        assert!(reconciled.ok, "{}", reconciled.content);
+        block_on(store.finish_plugin_job(
+            "host",
+            tick.job.id,
+            &tick.lease,
+            true,
+            "Reconciled",
+            100,
+        ))
+        .unwrap();
         clock.store(105, Ordering::Relaxed);
         let due = block_on(store.claim_plugin_jobs("host", 0, &"b".repeat(32), 105))
             .unwrap()

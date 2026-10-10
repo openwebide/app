@@ -147,13 +147,8 @@ impl<D: Db> Store<D> {
                         next_after: None,
                     });
                 }
-                if *due_at < now {
-                    return Err(StorageError::InvalidRequest(
-                        "Choose a current or future job time".into(),
-                    ));
-                }
-                let count = self.db.execute("SELECT COUNT(*) FROM plugin_jobs WHERE user_id=? AND project_scope=? AND plugin=?", &scope).await?;
-                if count.rows[0].get_int(0)? >= MAX_JOBS {
+                let count = self.db.execute("SELECT COUNT(*) FROM plugin_jobs WHERE user_id=? AND project_scope=? AND plugin=? AND background_id IS NULL", &scope).await?;
+                if count.rows[0].get_int(0)? >= MAX_JOBS && !key.starts_with("background:") {
                     return Err(StorageError::InvalidRequest(
                         "Plugin job queue is full".into(),
                     ));
@@ -270,7 +265,8 @@ impl<D: Db> Store<D> {
         let expiry = lease_expiry(now)?;
         self.db.transaction(|tx| async move {
             let store = Store::new(tx);
-            let rows = store.db.execute(&format!("SELECT {COLUMNS},user_id,prepared,context FROM plugin_jobs WHERE host_id=? AND id>? AND due_at<=? AND (state='pending' OR (state='leased' AND lease_expires_at<=?)) ORDER BY id LIMIT 64"), &[DbValue::Text(host.into()),DbValue::Int(after),DbValue::Int(now),DbValue::Int(now)]).await?;
+            if after == 0 { store.enqueue_plugin_background(host, now).await?; }
+            let rows = store.db.execute(&format!("SELECT {COLUMNS},user_id,prepared,context,background_id FROM plugin_jobs WHERE host_id=? AND id>? AND due_at<=? AND (state='pending' OR (state='leased' AND lease_expires_at<=?)) ORDER BY id LIMIT 64"), &[DbValue::Text(host.into()),DbValue::Int(after),DbValue::Int(now),DbValue::Int(now)]).await?;
             let mut more = rows.rows.len() == usize::try_from(JOB_PAGE_SIZE).unwrap();
             let mut cursor = after;
             let mut bytes = 64usize;
@@ -282,6 +278,14 @@ impl<D: Db> Store<D> {
                     store.db.execute("UPDATE plugin_jobs SET state='expired',revision=revision+1 WHERE id=?", &[DbValue::Int(entry.id)]).await?;
                     cursor = entry.id;
                     continue;
+                }
+                if let Some(background) = row.get_int_opt(13) {
+                    let current = store.db.execute("SELECT 1 FROM plugin_background WHERE id=? AND prepared=?", &[DbValue::Int(background),DbValue::Text(row.get_text(11)?.into())]).await?;
+                    if current.rows.is_empty() {
+                        store.db.execute("UPDATE plugin_jobs SET state='cancelled',revision=revision+1 WHERE id=?", &[DbValue::Int(entry.id)]).await?;
+                        cursor = entry.id;
+                        continue;
+                    }
                 }
                 let user = UserId::new(row.get_int(10)?);
                 let prepared: PreparedPlugin = decode(row.get_text(11)?)?;
@@ -315,7 +319,7 @@ impl<D: Db> Store<D> {
         let expiry = lease_expiry(now)?;
         self.db.transaction(|tx| async move {
             let store = Store::new(tx);
-            let changed = store.db.execute("UPDATE plugin_jobs SET lease_expires_at=? WHERE id=? AND host_id=? AND lease=? AND state='leased' AND lease_expires_at>?", &[DbValue::Int(expiry),DbValue::Int(id),DbValue::Text(host.into()),DbValue::Text(lease.into()),DbValue::Int(now)]).await?;
+            let changed = store.db.execute("UPDATE plugin_jobs SET lease_expires_at=? WHERE id=? AND host_id=? AND lease=? AND state='leased' AND lease_expires_at>? AND (background_id IS NULL OR EXISTS(SELECT 1 FROM plugin_background b WHERE b.id=plugin_jobs.background_id AND b.prepared=plugin_jobs.prepared))", &[DbValue::Int(expiry),DbValue::Int(id),DbValue::Text(host.into()),DbValue::Text(lease.into()),DbValue::Int(now)]).await?;
             if changed.changes != 1 { return Err(StorageError::Conflict("Job lease is no longer current".into())); }
             store.db.execute("UPDATE plugin_execution_grants SET expires_at=? WHERE job_id=? AND job_lease=?", &[DbValue::Int(expiry),DbValue::Int(id),DbValue::Text(lease.into())]).await?;
             Ok(expiry)
@@ -362,7 +366,7 @@ impl<D: Db> Store<D> {
         }
         self.db.transaction(|tx| async move {
             let store = Store::new(tx);
-            let rows = store.db.execute("SELECT prepared,context,lease_expires_at FROM plugin_jobs WHERE id=? AND user_id=? AND host_id=? AND lease=? AND state='leased' AND lease_expires_at>?", &[DbValue::Int(id),DbValue::Int(user.get()),DbValue::Text(host.into()),DbValue::Text(lease.into()),DbValue::Int(now)]).await?;
+            let rows = store.db.execute("SELECT prepared,context,lease_expires_at FROM plugin_jobs WHERE id=? AND user_id=? AND host_id=? AND lease=? AND state='leased' AND lease_expires_at>? AND (background_id IS NULL OR EXISTS(SELECT 1 FROM plugin_background b WHERE b.id=plugin_jobs.background_id AND b.prepared=plugin_jobs.prepared))", &[DbValue::Int(id),DbValue::Int(user.get()),DbValue::Text(host.into()),DbValue::Text(lease.into()),DbValue::Int(now)]).await?;
             let row = rows.rows.first().ok_or_else(|| StorageError::Conflict("Job lease is no longer current".into()))?;
             let prepared: PreparedPlugin = decode(row.get_text(0)?)?;
             let mut context: PluginExecutionContext = decode(row.get_text(1)?)?;

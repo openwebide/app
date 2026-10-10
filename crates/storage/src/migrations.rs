@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 55;
+pub const SCHEMA_VERSION: i64 = 56;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -658,6 +658,26 @@ async fn apply_step<D: Db>(
                 ),
             ] {
                 db.execute(&format!("CREATE TRIGGER IF NOT EXISTS {name} {event} BEGIN UPDATE plugin_task_runs SET revision=revision+1,status=CASE {reference}.state WHEN 'pending' THEN 'queued' WHEN 'leased' THEN 'claimed' WHEN 'completed' THEN 'complete' ELSE {reference}.state END,detail={reference}.detail,session_id={reference}.session_id,message_id={reference}.message_id,permission_id={reference}.permission_id WHERE linked_run={reference}.id; END"),&[]).await?;
+            }
+            Ok(())
+        }
+        56 => {
+            db.execute("CREATE TABLE IF NOT EXISTS plugin_background (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, plugin TEXT NOT NULL, host_id TEXT NOT NULL, prepared TEXT NOT NULL, next_due INTEGER NOT NULL, UNIQUE(user_id,project_scope,plugin))",&[]).await?;
+            db.execute("CREATE INDEX IF NOT EXISTS plugin_background_due ON plugin_background(host_id,next_due,id)",&[]).await?;
+            if db
+                .execute(
+                    "SELECT 1 FROM pragma_table_info('plugin_jobs') WHERE name='background_id'",
+                    &[],
+                )
+                .await?
+                .rows
+                .is_empty()
+            {
+                db.execute(
+                    "ALTER TABLE plugin_jobs ADD COLUMN background_id INTEGER",
+                    &[],
+                )
+                .await?;
             }
             Ok(())
         }
