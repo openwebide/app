@@ -1095,7 +1095,7 @@ mod rust_plugin_tests {
                                 user_id: _,
                                 delivery,
                             } => {
-                                let grant = "f".repeat(32);
+                                let grant = format!("{:032x}", delivery.id);
                                 let (prepared, context) = db
                                     .store
                                     .issue_plugin_job_grant(
@@ -1269,7 +1269,7 @@ mod rust_plugin_tests {
         // Raw run requests execute inside source code through normal callback grants.
         let raw = executor.execute(&openwebide_core::ToolCall {
             id: "raw-run".into(), name: "fixture_echo".into(),
-            arguments: serde_json::json!({"runs":{"action":"submit","key":"raw-one","prompt":"Source-owned prompt","target":{"kind":"origin"}}}).to_string(),
+            arguments: serde_json::json!({"runs":{"action":"submit","key":"raw-one","prompt":"Source-owned prompt","target":{"kind":"origin"},"completion":{"event":"job_due","payload":{"text":"raw completion callback"}}}}).to_string(),
         }).await;
         assert!(raw.ok, "{}", raw.content);
         let raw: openwebide_core::plugins::runs::RunResult =
@@ -1303,6 +1303,31 @@ mod rust_plugin_tests {
                 .unwrap()
                 .is_empty()
         );
+        // A real compiled SDK submission reserves and releases its declared completion event.
+        let completion = store
+            .claim_plugin_jobs(&prepared.host_id, 0, &"d".repeat(32), 20)
+            .await
+            .unwrap()
+            .jobs
+            .remove(0);
+        assert_eq!(completion.job.payload["run"]["id"], raw.runs[0].id);
+        assert_eq!(completion.job.payload["run"]["state"], "cancelled");
+        assert_eq!(
+            completion.job.payload["data"]["text"],
+            "raw completion callback"
+        );
+        openwebide_agent::plugins::jobs::deliver(
+            &DatabaseHost {
+                store: store.clone(),
+                user,
+                session: None,
+                now: 21,
+            },
+            &executor.transport,
+            completion,
+        )
+        .await
+        .unwrap();
         // Public SDK code schedules a real durable event; delivery uses the same executor.
         let scheduled = executor.execute(&openwebide_core::ToolCall {
             id:"schedule".into(), name:"fixture_echo".into(),
@@ -1355,7 +1380,8 @@ mod rust_plugin_tests {
             .await;
         assert!(events.ok, "{}", events.content);
         assert!(events.content.contains("durable plugin event"));
-        let grant = "f".repeat(32);
+        assert!(events.content.contains("raw completion callback"));
+        let grant = format!("{:032x}", queued.jobs[0].id);
         let callback = execution::PluginHostRequest {
             grant,
             capability: "records".into(),

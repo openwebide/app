@@ -397,12 +397,12 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
-- Add durable completion callbacks for raw SDK prompt submissions; shared host
-  dispatch, owned conversations, model pins and queue-consumption guards exist. Queue
-  persistence, automatic event delivery, version pinning, renewable leases and
-  scoped callback authority already share one workflow and store.
-  Route remaining UI and background invocations through the sessionless
-  execution-context API; Memory mutations already use shared guarded actions.
+- Complete the Scheduling migration using raw SDK run submissions and durable
+  completion events; host dispatch, owned conversations, model pins and atomic
+  terminal callbacks share the same event queue, version pinning, renewable leases
+  and scoped callback authority. Route remaining UI and background invocations
+  through the sessionless execution-context API; Memory mutations already use
+  shared guarded actions.
 - Extend authenticated, run-pinned private record callbacks with shared collection
   adapters beyond the existing Memory and Skills data adapters and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and

@@ -9,17 +9,19 @@ for what's still ahead.
 
 ## [Unreleased]
 
-- Dispatch raw plugin prompts automatically through the shared host runner on server and paired hosts. Renew leases during preparation and execution, release busy claims, retry status acknowledgements and cancel deliveries on lease loss or shutdown. Durable completion callbacks and executable Scheduling remain in progress.
+- Deliver declared plugin completion events atomically with terminal raw-run status, including cancellation, preflight failures and interrupted-host recovery. Reserve event capacity on submission, pin the submitting source version, preserve released callbacks during history cleanup and reuse shared leased event delivery. Executable Scheduling and deployed defaults remain in progress.
 
-- Add host-bound raw plugin run claims, renewable leases, status acknowledgements and recovery that never replays consumed prompts. Cancel dropped agent preparations and release their reservations; completion callbacks remain in progress.
+- Dispatch raw plugin prompts automatically through the shared host runner on server and paired hosts. Renew leases during preparation and execution, release busy claims, retry status acknowledgements and cancel deliveries on lease loss or shutdown. Executable Scheduling remains in progress.
 
-- Add capability-gated durable raw plugin prompt submissions with owned conversations, idempotency keys, bounded history, model pins and atomic queue delivery guards. Keep plugin prompts out of browser queue draining; completion callbacks and Scheduling remain in progress.
+- Add host-bound raw plugin run claims, renewable leases, status acknowledgements and recovery that never replays consumed prompts. Cancel dropped agent preparations and release their reservations; executable Scheduling remains in progress.
 
-- Deliver durable plugin events automatically through a shared worker with bounded concurrency, lease renewal during preparation/execution, sessionless grants and actor cancellation on lease loss. Run submission and executable Scheduling remain in progress.
+- Add capability-gated durable raw plugin prompt submissions with owned conversations, idempotency keys, bounded history, model pins and atomic queue delivery guards. Keep plugin prompts out of browser queue draining; Scheduling remains in progress.
+
+- Deliver durable plugin events automatically through a shared worker with bounded concurrency, lease renewal during preparation/execution, sessionless grants and actor cancellation on lease loss. Executable Scheduling remains in progress.
 
 - Prevent plugin HTTP from bootstrapping bridge credentials or bypassing SDK grants through Open WebIDE control APIs, preserving ordinary public and LAN HTTP access.
 
-- Add capability-gated durable plugin jobs with immutable source snapshots, idempotency keys, bounded pages, renewable leases and terminal-job cleanup. Scope callbacks to the current delivery and stop new claims for disabled plugins. Background polling, run submission and the Scheduling migration remain in progress.
+- Add capability-gated durable plugin jobs with immutable source snapshots, idempotency keys, bounded pages, renewable leases and terminal-job cleanup. Scope callbacks to the current delivery and stop new claims for disabled plugins. The Scheduling migration remains in progress.
 
 - Prepare pinned Rust plugins on the selected execution host before agent tools, context hooks and event callbacks. Validate source, manifest and digest before execution, supporting cold caches and offline reuse through the same shared workflow.
 

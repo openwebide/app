@@ -203,7 +203,7 @@ completion or lease replacement. Terminal jobs can be deleted to release quota
 and their idempotency keys. The bridge polls for due events and runs them through the shared execution
 workflow, renewing leases during compilation and execution. Delivery is at least
 once; plugin code must use stable keys and revision checks for repeatable effects.
-Durable completion callbacks and the Scheduling policy migration remain unfinished.
+The Scheduling policy migration remains unfinished.
 
 The prototype `runs` capability exposes durable raw prompt submissions through
 `list`, `read`, `submit`, `cancel` and terminal `delete`. Submissions use stable
@@ -226,8 +226,18 @@ status policy on server and paired hosts. Busy conversations release unconsumed
 claims. Transient status-report failures retry while the lease heartbeat remains
 active; lost leases cancel preparation or execution. Daemon shutdown drops active
 deliveries. Completed reports retain bounded raw assistant output, without
-interpreting a task or monitor outcome. Durable completion callbacks and the
-executable Scheduling migration remain unfinished.
+interpreting a task or monitor outcome. Submissions may attach a `completion`
+object containing a declared `event` and at most 64 KiB of `payload`. The host
+reserves an event queue slot as part of submission; a full queue rolls back the
+prompt and conversation creation. That event waits until the run reaches a
+terminal state, then receives `{run: PluginRun, data: payload}` atomically with
+the state update. Queue cancellation, preflight failure and interrupted-host
+recovery also release it. Repeated status acknowledgements do not enqueue another
+event. Released events survive run-history deletion and retain the submitting
+source version, model and context across updates. Existing event lease/disablement
+rules and at-least-once delivery apply. Callback cancellation suppresses delivery;
+plugins own idempotency and outcome interpretation. Executable Scheduling remains
+unfinished.
 
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.

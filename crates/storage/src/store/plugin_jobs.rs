@@ -173,7 +173,7 @@ impl<D: Db> Store<D> {
             } => {
                 let mut params = scope.clone();
                 params.extend([DbValue::Int(*target), DbValue::Int(*revision)]);
-                let changed = self.db.execute("UPDATE plugin_jobs SET state='cancelled',revision=revision+1 WHERE user_id=? AND project_scope=? AND plugin=? AND id=? AND revision=? AND state IN ('pending','leased')", &params).await?;
+                let changed = self.db.execute("UPDATE plugin_jobs SET state='cancelled',revision=revision+1 WHERE user_id=? AND project_scope=? AND plugin=? AND id=? AND revision=? AND state IN ('waiting','pending','leased')", &params).await?;
                 if changed.changes != 1 {
                     return Err(StorageError::Conflict(
                         "Job changed or is unavailable".into(),

@@ -15,6 +15,51 @@ struct Fixture {
     plugin: PreparedPlugin,
 }
 impl Fixture {
+    fn completion_submission() -> RunRequest {
+        RunRequest::Submit {
+            completion: Some(RunCompletion {
+                event: "due".into(),
+                payload: json!({"task":"my-task"}),
+            }),
+            key: "completion".into(),
+            prompt: "Plugin-owned prompt".into(),
+            target: RunTarget::Origin,
+            model: None,
+        }
+    }
+    async fn jobs(&self) -> openwebide_core::plugins::jobs::JobResult {
+        let value = self
+            .store
+            .plugin_host_request(
+                self.user,
+                self.session,
+                &PluginHostRequest {
+                    grant: "a".repeat(32),
+                    capability: "jobs".into(),
+                    payload: json!({"action":"list"}).to_string(),
+                },
+                2,
+            )
+            .await
+            .unwrap();
+        serde_json::from_str(&value).unwrap()
+    }
+    async fn bind_host(&self, mode: WorkspaceMode) {
+        if mode == WorkspaceMode::Local {
+            self.store
+                .set_user_setting(
+                    self.user,
+                    &format!("scheduled_host_{}", self.project),
+                    &encode(&openwebide_core::scheduled::HostBinding {
+                        host_id: self.plugin.host_id.clone(),
+                        path: "repos/local".into(),
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+    }
     async fn new(mode: WorkspaceMode) -> Self {
         let store = Store::new(RusqliteDb::open_in_memory().unwrap());
         store.migrate().await.unwrap();
@@ -118,8 +163,391 @@ impl Fixture {
             prompt: "Plugin-owned prompt".into(),
             target: RunTarget::Origin,
             model: None,
+            completion: None,
         }
     }
+}
+
+#[test]
+fn completion_events_are_reserved_atomic_pinned_and_delivered_once_after_terminal_status() {
+    use openwebide_core::plugins::jobs::JobState;
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            f.bind_host(mode).await;
+            let submitted = f
+                .request(&Fixture::completion_submission())
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            assert_eq!(
+                f.request(&Fixture::completion_submission())
+                    .await
+                    .unwrap()
+                    .runs[0]
+                    .id,
+                submitted.id
+            );
+            let reserved = f.jobs().await;
+            assert_eq!(reserved.jobs.len(), 1);
+            assert_eq!(reserved.jobs[0].state, JobState::Waiting);
+            // Install another version before completion; the event retains its original code.
+            let mut newer = f.plugin.clone();
+            newer.source.commit = "c".repeat(40);
+            newer.digest = "d".repeat(64);
+            newer.manifest.version = "0.2.0".into();
+            let revision = f.store.plugin_installations(f.user).await.unwrap()[0].revision;
+            f.store
+                .record_plugin(
+                    f.user,
+                    &RecordPlugin {
+                        prepared: newer.clone(),
+                        revision: Some(revision),
+                        approved_capabilities: vec![],
+                        update_policy: None,
+                        package: Some(Box::new(PluginPackage {
+                            prepared: newer,
+                            skills: vec![],
+                        })),
+                    },
+                    3,
+                )
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .claim_plugin_jobs(&f.plugin.host_id, 0, &"c".repeat(32), 3)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .is_empty()
+            );
+            let run = f
+                .store
+                .claim_plugin_runs(&f.plugin.host_id, 0, &"b".repeat(32), 3)
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            f.store
+                .session_run_lease(f.user, f.session, &run.run_id(), false, 4)
+                .await
+                .unwrap();
+            f.store
+                .consume_queued_prompt(f.user, f.session, run.prompt.key(), &run.prompt.content, 4)
+                .await
+                .unwrap();
+            let report = RunReport {
+                state: RunState::Completed,
+                detail: "raw assistant output".into(),
+                permission_id: None,
+            };
+            f.store
+                .report_plugin_run(&run.lease, &report, 5)
+                .await
+                .unwrap();
+            f.store
+                .report_plugin_run(&run.lease, &report, 6)
+                .await
+                .unwrap();
+            let ready = f.jobs().await;
+            assert_eq!(ready.jobs.len(), 1);
+            assert_eq!(ready.jobs[0].state, JobState::Pending);
+            assert_eq!(ready.jobs[0].revision, 2);
+            assert_eq!(ready.jobs[0].payload["data"], json!({"task":"my-task"}));
+            let result: PluginRun =
+                serde_json::from_value(ready.jobs[0].payload["run"].clone()).unwrap();
+            assert_eq!(result.id, submitted.id);
+            assert_eq!(result.state, RunState::Completed);
+            assert_eq!(result.detail, "raw assistant output");
+            assert!(result.message_id.is_some());
+            // History cleanup cannot discard an already released callback.
+            f.request(&RunRequest::Delete {
+                id: result.id,
+                revision: result.revision,
+            })
+            .await
+            .unwrap();
+            let event = f
+                .store
+                .claim_plugin_jobs(&f.plugin.host_id, 0, &"c".repeat(32), 7)
+                .await
+                .unwrap()
+                .jobs
+                .remove(0);
+            assert_eq!(event.prepared.source, f.plugin.source);
+            assert_eq!(event.prepared.digest, f.plugin.digest);
+            assert_eq!(event.context.session_id, Some(f.session));
+            assert!(
+                f.store
+                    .claim_plugin_jobs(&f.plugin.host_id, 0, &"d".repeat(32), 8)
+                    .await
+                    .unwrap()
+                    .jobs
+                    .is_empty()
+            );
+            let (prepared, context) = f
+                .store
+                .issue_plugin_job_grant(
+                    f.user,
+                    &f.plugin.host_id,
+                    event.job.id,
+                    &event.lease,
+                    &"e".repeat(32),
+                    8,
+                )
+                .await
+                .unwrap();
+            assert_eq!(prepared.source, f.plugin.source);
+            assert_eq!(context.session_id, None);
+            assert!(!context.user_action);
+        }
+    });
+}
+
+#[test]
+fn completion_migration_preserves_prior_run_history_and_replays_idempotently() {
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let original = f
+                .request(&Fixture::submission("old-schema"))
+                .await
+                .unwrap()
+                .runs
+                .remove(0);
+            f.store
+                .db
+                .execute("DROP TRIGGER complete_plugin_run_event", &[])
+                .await
+                .unwrap();
+            f.store
+                .db
+                .execute("DROP TRIGGER delete_plugin_run_event", &[])
+                .await
+                .unwrap();
+            f.store
+                .db
+                .execute("ALTER TABLE plugin_runs DROP COLUMN completion_job", &[])
+                .await
+                .unwrap();
+            f.store
+                .db
+                .execute("PRAGMA user_version=51", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            let preserved = f
+                .request(&RunRequest::Read { id: original.id })
+                .await
+                .unwrap();
+            assert_eq!(preserved.runs[0].key, "old-schema");
+            assert_eq!(preserved.runs[0].state, RunState::Pending);
+            assert_eq!(
+                f.store
+                    .list_queued_prompts(f.user, f.session)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            f.store
+                .db
+                .execute("PRAGMA user_version=51", &[])
+                .await
+                .unwrap();
+            f.store.migrate().await.unwrap();
+            f.request(&Fixture::completion_submission()).await.unwrap();
+            assert_eq!(f.jobs().await.jobs.len(), 1);
+        }
+    });
+}
+
+#[test]
+fn completion_events_cover_queue_cancellation_failure_and_interrupted_recovery() {
+    use openwebide_core::plugins::jobs::JobState;
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            for outcome in [
+                "queue-cancel",
+                "failure",
+                "interrupted",
+                "conversation-removed",
+            ] {
+                let f = Fixture::new(mode).await;
+                f.bind_host(mode).await;
+                f.request(&Fixture::completion_submission()).await.unwrap();
+                let expected = match outcome {
+                    "queue-cancel" => {
+                        let queued = f
+                            .store
+                            .list_queued_prompts(f.user, f.session)
+                            .await
+                            .unwrap()
+                            .remove(0);
+                        f.store
+                            .remove_queued_prompt(f.user, f.session, queued.key())
+                            .await
+                            .unwrap();
+                        RunState::Cancelled
+                    }
+                    "conversation-removed" => {
+                        f.store.delete_session(f.session, f.user).await.unwrap();
+                        RunState::Cancelled
+                    }
+                    _ => {
+                        let run = f
+                            .store
+                            .claim_plugin_runs(&f.plugin.host_id, 0, &"b".repeat(32), 3)
+                            .await
+                            .unwrap()
+                            .runs
+                            .remove(0);
+                        if outcome == "failure" {
+                            f.store
+                                .report_plugin_run(
+                                    &run.lease,
+                                    &RunReport {
+                                        state: RunState::Failed,
+                                        detail: "Preflight failed".into(),
+                                        permission_id: None,
+                                    },
+                                    4,
+                                )
+                                .await
+                                .unwrap();
+                            RunState::Failed
+                        } else {
+                            f.store
+                                .session_run_lease(f.user, f.session, &run.run_id(), false, 4)
+                                .await
+                                .unwrap();
+                            f.store
+                                .consume_queued_prompt(
+                                    f.user,
+                                    f.session,
+                                    run.prompt.key(),
+                                    &run.prompt.content,
+                                    4,
+                                )
+                                .await
+                                .unwrap();
+                            assert!(
+                                f.store
+                                    .claim_plugin_runs(&f.plugin.host_id, 0, &"c".repeat(32), 124)
+                                    .await
+                                    .unwrap()
+                                    .runs
+                                    .is_empty()
+                            );
+                            RunState::Interrupted
+                        }
+                    }
+                };
+                let rows = f
+                    .store
+                    .db
+                    .execute("SELECT state,payload FROM plugin_jobs", &[])
+                    .await
+                    .unwrap();
+                assert_eq!(rows.rows.len(), 1);
+                let state: JobState =
+                    serde_json::from_value(json!(rows.rows[0].get_text(0).unwrap())).unwrap();
+                assert_eq!(state, JobState::Pending);
+                let payload: serde_json::Value =
+                    serde_json::from_str(rows.rows[0].get_text(1).unwrap()).unwrap();
+                let result: PluginRun = serde_json::from_value(payload["run"].clone()).unwrap();
+                assert_eq!(result.state, expected);
+                if outcome == "conversation-removed" {
+                    assert!(
+                        f.store
+                            .claim_plugin_jobs(&f.plugin.host_id, 0, &"d".repeat(32), 125)
+                            .await
+                            .unwrap()
+                            .jobs
+                            .is_empty()
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn completion_capacity_and_event_validation_roll_back_submission_and_cancel_can_suppress_callback()
+{
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let mut invalid = Fixture::completion_submission();
+            if let RunRequest::Submit {
+                completion: Some(completion),
+                ..
+            } = &mut invalid
+            {
+                completion.event = "undeclared".into();
+            }
+            assert!(f.request(&invalid).await.is_err());
+            assert!(
+                f.store
+                    .list_queued_prompts(f.user, f.session)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            f.request(&Fixture::completion_submission()).await.unwrap();
+            let job = f.jobs().await.jobs.remove(0);
+            f.store
+                .plugin_host_request(
+                    f.user,
+                    f.session,
+                    &PluginHostRequest {
+                        grant: "a".repeat(32),
+                        capability: "jobs".into(),
+                        payload: json!({"action":"cancel","id":job.id,"revision":job.revision})
+                            .to_string(),
+                    },
+                    3,
+                )
+                .await
+                .unwrap();
+            let queued = f
+                .store
+                .list_queued_prompts(f.user, f.session)
+                .await
+                .unwrap()
+                .remove(0);
+            f.store
+                .remove_queued_prompt(f.user, f.session, queued.key())
+                .await
+                .unwrap();
+            assert_eq!(
+                f.jobs().await.jobs[0].state,
+                openwebide_core::plugins::jobs::JobState::Cancelled
+            );
+            let f = Fixture::new(mode).await;
+            f.store.db.execute("WITH RECURSIVE entries(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM entries WHERE id<1000) INSERT INTO plugin_jobs(user_id,project_scope,plugin,job_key,due_at,event,payload,prepared,context,host_id) SELECT ?,?,?,CAST(id AS TEXT),0,'due','{}',?,?,? FROM entries", &[
+                DbValue::Int(f.user.get()),DbValue::Int(f.project),DbValue::Text(f.plugin.storage_namespace()),
+                DbValue::Text(encode(&f.plugin).unwrap()),DbValue::Text(encode(&PluginExecutionContext {project_id:Some(f.project),session_id:Some(f.session),..Default::default()}).unwrap()),DbValue::Text(f.plugin.host_id.clone()),
+            ]).await.unwrap();
+            assert!(f.request(&Fixture::completion_submission()).await.is_err());
+            assert!(
+                f.store
+                    .list_queued_prompts(f.user, f.session)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                f.request(&RunRequest::List { after: 0 })
+                    .await
+                    .unwrap()
+                    .runs
+                    .is_empty()
+            );
+        }
+    });
 }
 #[test]
 fn raw_submissions_are_owned_idempotent_cancellable_and_queue_atomic_in_both_modes() {
@@ -234,6 +662,7 @@ fn raw_submissions_are_owned_idempotent_cancellable_and_queue_atomic_in_both_mod
                     prompt: "x".into(),
                     target: RunTarget::Session { id: session },
                     model: None,
+                    completion: None,
                 };
                 assert!(f.request(&request).await.is_err());
             }
@@ -273,6 +702,7 @@ fn queue_limits_roll_back_new_conversations_and_manual_removal_cancels_submissio
                     title: "Plugin supplied title".into(),
                 },
                 model: None,
+                completion: None,
             };
             let run = f.request(&new).await.unwrap().runs.remove(0);
             let session = run.session_id.unwrap();
@@ -310,6 +740,7 @@ fn queue_limits_roll_back_new_conversations_and_manual_removal_cancels_submissio
                         title: "temporary".into(),
                     },
                     model: None,
+                    completion: None,
                 })
                 .await
                 .unwrap()
@@ -488,8 +919,22 @@ fn run_models_are_pinned_without_mutating_conversation_and_project_deletion_clea
                 prompt: "x".into(),
                 target: RunTarget::Origin,
                 model: Some(selected.clone()),
+                completion: Some(RunCompletion {
+                    event: "due".into(),
+                    payload: json!({}),
+                }),
             };
             let run = f.request(&command).await.unwrap().runs.remove(0);
+            let callback = f
+                .store
+                .db
+                .execute("SELECT context FROM plugin_jobs", &[])
+                .await
+                .unwrap();
+            let callback: PluginExecutionContext =
+                serde_json::from_str(callback.rows[0].get_text(0).unwrap()).unwrap();
+            assert_eq!(callback.primary, Some(selected.clone()));
+            assert_eq!(callback.session_id, Some(f.session));
             let queued = f
                 .store
                 .list_queued_prompts(f.user, f.session)

@@ -84,6 +84,7 @@ impl JobRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
+    Waiting,
     Pending,
     Leased,
     Completed,

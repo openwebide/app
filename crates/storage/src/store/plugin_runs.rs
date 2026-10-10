@@ -48,9 +48,21 @@ impl<D: Db> Store<D> {
                 prompt,
                 target,
                 model,
+                completion,
             } => {
                 if !self.plugin_namespace_enabled(user, context, plugin).await? {
                     return Err(StorageError::Conflict("Plugin is no longer enabled".into()));
+                }
+                if completion.as_ref().is_some_and(|completion| {
+                    !plugin
+                        .manifest
+                        .contributions
+                        .events
+                        .contains(&completion.event)
+                }) {
+                    return Err(StorageError::InvalidRequest(
+                        "Plugin does not declare this completion event".into(),
+                    ));
                 }
                 let encoded = encode(request)?;
                 let mut params = scope.clone();
@@ -122,7 +134,33 @@ impl<D: Db> Store<D> {
                         .map_or(DbValue::Null, DbValue::Text),
                     DbValue::Int(now),
                 ]);
-                id = Some(self.db.execute("INSERT INTO plugin_runs(user_id,project_scope,plugin,run_key,request,prepared,context,host_id,session_id,queued_id,model,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", &params).await?.last_insert_rowid);
+                let inserted = self.db.execute("INSERT INTO plugin_runs(user_id,project_scope,plugin,run_key,request,prepared,context,host_id,session_id,queued_id,model,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", &params).await?.last_insert_rowid;
+                if let Some(completion) = completion {
+                    let count = self.db.execute("SELECT count(*) FROM plugin_jobs WHERE user_id=? AND project_scope=? AND plugin=?", &scope).await?.rows[0].get_int(0)?;
+                    if count >= openwebide_core::plugins::jobs::MAX_JOBS {
+                        return Err(StorageError::Conflict("Plugin event queue is full; delete terminal events before submitting a completion callback".into()));
+                    }
+                    let mut callback_context = context.clone();
+                    callback_context.primary = model.cloned();
+                    let mut callback = scope.clone();
+                    // '$' is excluded from author-selected job keys: internal callbacks cannot collide.
+                    callback.extend([
+                        DbValue::Text(format!("$run:{inserted}")),
+                        DbValue::Text(completion.event.clone()),
+                        DbValue::Text(encode(&completion.payload)?),
+                        DbValue::Text(encode(plugin)?),
+                        DbValue::Text(encode(&callback_context)?),
+                        DbValue::Text(plugin.host_id.clone()),
+                    ]);
+                    let job = self.db.execute("INSERT INTO plugin_jobs(user_id,project_scope,plugin,job_key,due_at,event,payload,prepared,context,host_id,state) VALUES(?,?,?,?,0,?,?,?,?,?,'waiting')", &callback).await?.last_insert_rowid;
+                    self.db
+                        .execute(
+                            "UPDATE plugin_runs SET completion_job=? WHERE id=?",
+                            &[DbValue::Int(job), DbValue::Int(inserted)],
+                        )
+                        .await?;
+                }
+                id = Some(inserted);
             }
             RunRequest::Cancel {
                 id: selected,

@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 pub const MAX_RUNS: i64 = 1000;
 pub const RUN_PAGE_SIZE: i64 = 16;
 
+/// A declared event receives `{run: PluginRun, data: payload}` after termination.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCompletion {
+    pub event: String,
+    pub payload: serde_json::Value,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunTarget {
@@ -27,6 +35,8 @@ pub enum RunRequest {
         target: RunTarget,
         #[serde(default)]
         model: Option<crate::ModelSelection>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion: Option<RunCompletion>,
     },
     Cancel {
         id: i64,
@@ -52,6 +62,7 @@ impl RunRequest {
                 prompt,
                 target,
                 model,
+                completion,
             } => {
                 if key.is_empty()
                     || key.len() > 128
@@ -84,6 +95,16 @@ impl RunRequest {
                         || model.model.chars().any(char::is_control)
                 }) {
                     return Err("Choose a valid run model".into());
+                }
+                if let Some(completion) = completion {
+                    super::execution::validate_event(&completion.event, &completion.payload)?;
+                    if serde_json::to_vec(&completion.payload)
+                        .map_err(|error| error.to_string())?
+                        .len()
+                        > 64 * 1024
+                    {
+                        return Err("Run completion data exceeds 64 KiB".into());
+                    }
                 }
                 Ok(())
             }

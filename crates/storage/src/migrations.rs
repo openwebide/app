@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 51;
+pub const SCHEMA_VERSION: i64 = 52;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -582,6 +582,24 @@ async fn apply_step<D: Db>(
             db.execute("CREATE TRIGGER IF NOT EXISTS delete_plugin_run_queue AFTER DELETE ON plugin_runs BEGIN DELETE FROM queued_prompts WHERE id=OLD.queued_id; END", &[]).await?;
             db.execute("CREATE TRIGGER IF NOT EXISTS cancel_plugin_run_queue BEFORE DELETE ON queued_prompts BEGIN UPDATE plugin_runs SET state='cancelled',revision=revision+1,detail='Queued prompt removed' WHERE queued_id=OLD.id AND state IN ('pending','leased') AND message_id IS NULL; END", &[]).await?;
             db.execute("CREATE TRIGGER IF NOT EXISTS cancel_session_plugin_runs BEFORE DELETE ON sessions BEGIN UPDATE plugin_runs SET state=CASE WHEN message_id IS NULL THEN 'cancelled' ELSE 'interrupted' END,revision=revision+1,detail='Conversation removed',permission_id=NULL WHERE session_id=OLD.id AND state IN ('pending','leased','running','blocked','cancelling'); END", &[]).await?;
+            Ok(())
+        }
+        52 => {
+            if db
+                .execute(
+                    "SELECT 1 FROM pragma_table_info('plugin_runs') WHERE name='completion_job'",
+                    &[],
+                )
+                .await?
+                .rows
+                .is_empty()
+            {
+                db.execute("ALTER TABLE plugin_runs ADD COLUMN completion_job INTEGER REFERENCES plugin_jobs(id) ON DELETE SET NULL", &[]).await?;
+            }
+            // Every terminal transition, including queue/session deletion and recovery,
+            // releases the reserved event in the same transaction as the run status.
+            db.execute("CREATE TRIGGER IF NOT EXISTS complete_plugin_run_event AFTER UPDATE OF state ON plugin_runs WHEN NEW.state IN ('completed','failed','cancelled','interrupted') AND OLD.state NOT IN ('completed','failed','cancelled','interrupted') BEGIN UPDATE plugin_jobs SET state='pending',revision=revision+1,payload=json_object('run',json_object('id',NEW.id,'revision',NEW.revision,'key',NEW.run_key,'session_id',NEW.session_id,'state',NEW.state,'created_at',NEW.created_at,'detail',NEW.detail,'message_id',NEW.message_id,'permission_id',NEW.permission_id),'data',json(payload)) WHERE id=NEW.completion_job AND state='waiting'; END", &[]).await?;
+            db.execute("CREATE TRIGGER IF NOT EXISTS delete_plugin_run_event AFTER DELETE ON plugin_runs BEGIN UPDATE plugin_jobs SET state='cancelled',revision=revision+1 WHERE id=OLD.completion_job AND state='waiting'; END", &[]).await?;
             Ok(())
         }
         other => Err(StorageError::Db(format!("unknown migration step {other}"))),
