@@ -7,6 +7,79 @@ use openwebide_core::plugins::{
 use serde_json::{Value, json};
 
 impl<D: Db> Store<D> {
+    /// Raw model preferences and public server metadata, without selection policy.
+    pub(super) async fn plugin_configuration_in_transaction(
+        &self,
+        user: UserId,
+        request: &RecordRequest,
+    ) -> Result<CollectionResult, StorageError> {
+        match request.operation {
+            RecordOperation::List { after: 0 } | RecordOperation::Read { id: 1 } => (),
+            RecordOperation::List { .. } => {
+                return Ok(CollectionResult {
+                    enabled: true,
+                    records: vec![],
+                    next: None,
+                });
+            }
+            RecordOperation::Read { .. } => {
+                return Err(StorageError::NotFound("Configuration metadata".into()));
+            }
+            _ => {
+                return Err(StorageError::InvalidRequest(
+                    "Configuration metadata is read-only".into(),
+                ));
+            }
+        }
+        let defaults = self
+            .get_user_setting(user, "model_defaults")
+            .await?
+            .and_then(|value| serde_json::from_str::<openwebide_core::ModelDefaults>(&value).ok())
+            .unwrap_or_default();
+        let default_connection = self
+            .get_user_setting(user, "default_connection")
+            .await?
+            .and_then(|value| value.parse::<i64>().ok());
+        // These are shared server facts, not per-user copies. No endpoint or credential
+        // is exported. The account's preference merely names one of these servers.
+        let rows = self
+            .db
+            .execute(
+                "SELECT id,model,enabled FROM connections ORDER BY id LIMIT 257",
+                &[],
+            )
+            .await?;
+        if rows.rows.len() > 256 {
+            return Err(StorageError::InvalidValue(
+                "Configuration metadata holds at most 256 servers".into(),
+            ));
+        }
+        let servers=rows.rows.iter().map(|row|Ok(json!({"id":row.get_int(0)?,"model":row.get_text_opt(1),"enabled":row.get_int(2)?!=0})))
+            .collect::<Result<Vec<_>,StorageError>>()?;
+        let value = json!({"primary":defaults.primary,"fast":defaults.fast,
+            "default_connection":default_connection,"servers":servers});
+        let encoded =
+            serde_json::to_vec(&value).map_err(|error| StorageError::Db(error.to_string()))?;
+        if encoded.len() > 64 * 1024 {
+            return Err(StorageError::InvalidValue(
+                "Configuration metadata exceeds 64 KiB".into(),
+            ));
+        }
+        let digest = openwebide_core::plugins::content_digest(&encoded);
+        let revision = i64::from_str_radix(&digest[..13], 16)
+            .map_err(|error| StorageError::Db(error.to_string()))?
+            + 1;
+        Ok(CollectionResult {
+            enabled: true,
+            records: vec![Record {
+                id: 1,
+                revision,
+                updated_at: 0,
+                value,
+            }],
+            next: None,
+        })
+    }
     pub(super) async fn plugin_conversations_in_transaction(
         &self,
         user: UserId,

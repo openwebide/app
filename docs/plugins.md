@@ -277,6 +277,26 @@ positive metadata-content tokens; `updated_at` denotes conversation activity.
 All mutations are rejected. Plugin code decides how to rank/filter these records
 or select a target; the host does not provide a "latest conversation" policy.
 
+The read-only `configuration` collection has one record, ID 1. Its value exposes
+raw account preferences `primary`, `fast` and `default_connection`, plus shared
+server metadata `servers: [{id, model, enabled}]`. It omits server names, endpoints,
+credentials and unrelated settings. Read or list from cursor 0 returns the current
+snapshot; later cursors are empty. Revisions are opaque positive content tokens,
+and `updated_at` is 0. Values are limited to 64 KiB and 256 servers. The host does
+not choose a default model. Source can use this metadata at delivery time rather
+than silently retaining the creating chat's primary model.
+
+The unlisted Scheduling source now exports five SDK tools and two durable event
+handlers. Native workflow tests cover its CRUD, recurrence, model/target selection,
+generation invalidation, bounded monitors and callback interpretation. An explicit
+cross-repository component contract uses `OPENWEBIDE_SCHEDULING_COMPONENT` and
+`OPENWEBIDE_SCHEDULING_MANIFEST` to run the built WASM against shared SQLite grants
+and collections in both project modes (`cargo test -p openwebide-bridge --test
+scheduling_component -- --ignored`). It covers task creation, due submission,
+cancellation completion and deletion; it does not prove Git installation, actual
+model execution, production compiler isolation or the deployed browser lifecycle.
+Crash recovery, task-history/UI integration, retention and deployment remain open.
+
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.
 The host protects managed or disabled skills from mutation and omits disabled

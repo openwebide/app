@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Expose current account model preferences and shared public server metadata through read-only SDK collections, without choosing models or exporting endpoints. The unlisted Scheduling Rust source now owns CRUD, due delivery, recurrence, cancellation and monitor-result handlers; lifecycle recovery, history/UI integration and deployment remain in progress.
+
 - Expose existing task and monitor data through scoped SDK collection CRUD with revisions and plugin ownership. Preserve task IDs/history and keep plugin-owned tasks out of legacy dispatch. Add atomic record prerequisites to raw prompt submissions so stale handlers cannot queue new work after an edit or deletion; Scheduling handlers and deployment remain in progress.
 
 - Let executable plugins choose origin-bound or project-scoped durable events, preserving model pins while allowing saved work to outlive its creating chat. Add bounded, read-only conversation metadata through the shared collections SDK; target selection remains in plugin source. Executable Scheduling and deployed defaults remain in progress.

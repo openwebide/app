@@ -403,7 +403,8 @@ capability.
   renewable leases and scoped callback authority. Task collection CRUD preserves
   existing IDs/history and excludes plugin-owned records from legacy dispatch;
   record prerequisites atomically reject stale new prompt submissions. Finish
-  source-owned task/monitor handlers, history integration, recovery and cancellation,
+  source-owned task/monitor lifecycle recovery, history/UI integration, retention
+  and cancellation failure handling,
   then activate the executable release. Route remaining UI and
   background invocations through the sessionless execution-context API; Memory
   mutations already use shared guarded actions.

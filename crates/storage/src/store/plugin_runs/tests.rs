@@ -2212,3 +2212,148 @@ fn task_collection_pages_are_bounded_and_schema_upgrade_preserves_legacy_data() 
         }
     });
 }
+
+#[test]
+fn configuration_metadata_is_read_only_account_scoped_current_and_credential_free() {
+    use openwebide_core::plugins::records::CollectionResult;
+    block_on(async {
+        for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+            let f = Fixture::new(mode).await;
+            let server = f
+                .store
+                .insert_connection(&NewConnection {
+                    name: "private server name".into(),
+                    kind: ProviderKind::Ollama,
+                    base_url: "http://private-server.test:1234".into(),
+                    model: Some("server model".into()),
+                    context_limit: None,
+                })
+                .await
+                .unwrap();
+            f.store.set_user_setting(f.user,"model_defaults",&json!({"primary":{"server_id":server.id,"model":"my default"},"fast":{"server_id":server.id,"model":"my fast"},"unrelated":"Do not export"}).to_string()).await.unwrap();
+            f.store
+                .set_user_setting(
+                    f.other,
+                    "model_defaults",
+                    &json!({"primary":{"server_id":server.id,"model":"other account"}}).to_string(),
+                )
+                .await
+                .unwrap();
+            f.store
+                .set_user_setting(f.user, "default_connection", &server.id.to_string())
+                .await
+                .unwrap();
+            let request = |token: &str, operation| PluginHostRequest {
+                grant: token.repeat(32),
+                capability: "collections".into(),
+                payload: json!({"collection":"configuration","operation":operation}).to_string(),
+            };
+            let read = request("a", json!({"action":"read","id":1}));
+            let body = f
+                .store
+                .plugin_host_request(f.user, f.session, &read, 2)
+                .await
+                .unwrap();
+            let page: CollectionResult = serde_json::from_str(&body).unwrap();
+            assert_eq!(page.records[0].value["primary"]["model"], "my default");
+            assert_eq!(page.records[0].value["fast"]["model"], "my fast");
+            assert_eq!(page.records[0].value["default_connection"], server.id);
+            assert_eq!(
+                page.records[0].value["servers"],
+                json!([{"id":server.id,"model":"server model","enabled":true}])
+            );
+            assert!(!body.contains("private-server"));
+            assert!(!body.contains("private server name"));
+            assert!(!body.contains("other account"));
+            assert!(!body.contains("unrelated"));
+            assert!(
+                f.store
+                    .plugin_host_request(f.other, f.session, &read, 2)
+                    .await
+                    .is_err()
+            );
+            for operation in [
+                json!({"action":"read","id":2}),
+                json!({"action":"create","value":{}}),
+                json!({"action":"update","id":1,"revision":page.records[0].revision,"value":{}}),
+                json!({"action":"delete","id":1,"revision":page.records[0].revision}),
+            ] {
+                assert!(
+                    f.store
+                        .plugin_host_request(f.user, f.session, &request("a", operation), 2)
+                        .await
+                        .is_err()
+                );
+            }
+            let empty: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(
+                        f.user,
+                        f.session,
+                        &request("a", json!({"action":"list","after":1})),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(empty.records.is_empty());
+            f.store
+                .issue_plugin_context_grant(
+                    f.user,
+                    &PluginExecutionContext::default(),
+                    &f.plugin,
+                    &"b".repeat(32),
+                    1,
+                )
+                .await
+                .unwrap();
+            let global: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_context_host_request(
+                        f.user,
+                        &request("b", json!({"action":"read","id":1})),
+                        2,
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(global, page);
+            f.store
+                .set_user_setting(
+                    f.user,
+                    "model_defaults",
+                    &json!({"primary":{"server_id":server.id,"model":"new default"}}).to_string(),
+                )
+                .await
+                .unwrap();
+            let changed: CollectionResult = serde_json::from_str(
+                &f.store
+                    .plugin_host_request(f.user, f.session, &read, 3)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(changed.records[0].value["primary"]["model"], "new default");
+            assert_ne!(changed.records[0].revision, page.records[0].revision);
+            f.store
+                .db
+                .execute(
+                    "UPDATE connections SET model=? WHERE id=?",
+                    &[
+                        DbValue::Text("x".repeat(64 * 1024)),
+                        DbValue::Int(server.id),
+                    ],
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                f.store
+                    .plugin_host_request(f.user, f.session, &read, 3)
+                    .await,
+                Err(StorageError::InvalidValue(_))
+            ));
+        }
+    });
+}

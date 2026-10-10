@@ -51,6 +51,11 @@ impl<D: Db> Store<D> {
         request
             .validate_with_limit(limit)
             .map_err(StorageError::InvalidRequest)?;
+        if request.collection == "configuration" {
+            return self
+                .plugin_configuration_in_transaction(user, request)
+                .await;
+        }
         if request.collection == "conversations" {
             return self
                 .plugin_conversations_in_transaction(user, context, request)
