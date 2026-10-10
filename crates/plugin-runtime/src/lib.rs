@@ -138,7 +138,7 @@ impl Runtime {
             bail!("Plugin definitions exceed their limit");
         }
         let tools: Vec<Tool> = serde_json::from_str(&json)?;
-        if tools.is_empty() || tools.len() > 100 {
+        if tools.len() > 100 {
             bail!("Invalid plugin tool count");
         }
         let mut names = std::collections::BTreeSet::new();
@@ -158,6 +158,28 @@ impl Runtime {
             }
         }
         Ok(tools)
+    }
+    pub fn events(&self, bytes: &[u8]) -> Result<Vec<String>> {
+        let (mut store, plugin) = self.instantiate(bytes, NoServices, &[])?;
+        let json = plugin.call_events(&mut store)?;
+        if json.len() > 8192 {
+            bail!("Plugin event declarations exceed their limit");
+        }
+        let events: Vec<String> = serde_json::from_str(&json)?;
+        let mut names = std::collections::BTreeSet::new();
+        if events.len() > 100
+            || events.iter().any(|name| {
+                !names.insert(name)
+                    || openwebide_core::plugins::execution::validate_event(
+                        name,
+                        &serde_json::Value::Null,
+                    )
+                    .is_err()
+            })
+        {
+            bail!("Invalid plugin event declarations");
+        }
+        Ok(events)
     }
     pub fn execute<H: HostServices + 'static>(
         &self,
@@ -212,6 +234,27 @@ impl Runtime {
             bail!("Plugin context can disable only its own declared tools");
         }
         Ok(contribution)
+    }
+    pub fn event<H: HostServices + 'static>(
+        &self,
+        bytes: &[u8],
+        services: H,
+        grants: &[String],
+        input: sdk::EventInput,
+    ) -> Result<Outcome> {
+        openwebide_core::plugins::execution::validate_event(&input.name, &input.payload)
+            .map_err(anyhow::Error::msg)?;
+        if !self.events(bytes)?.contains(&input.name) {
+            bail!("Event is not declared by this plugin");
+        }
+        let (mut store, plugin) = self.instantiate(bytes, services, grants)?;
+        let json = plugin
+            .call_event(&mut store, &serde_json::to_string(&input)?)?
+            .map_err(anyhow::Error::msg)?;
+        if json.len() > MAX_MESSAGE_BYTES {
+            bail!("Plugin event outcome exceeds its limit");
+        }
+        Ok(serde_json::from_str(&json)?)
     }
 }
 
@@ -377,6 +420,43 @@ mod tests {
                 .content,
             "Fact title"
         );
+    }
+    #[test]
+    fn host_events_execute_plugin_owned_behavior_with_the_same_capability_grants() {
+        let runtime = Runtime::new().unwrap();
+        let bytes = fixture();
+        let input = sdk::EventInput {
+            name: "job_due".into(),
+            payload: serde_json::json!({"job_id":7,"due_at":100}),
+        };
+        assert!(runtime.event(&bytes, Records, &[], input.clone()).is_err());
+        let result = runtime
+            .event(&bytes, Records, &["records".into()], input)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert!(result.ok);
+        assert_eq!(value["operation"]["value"]["event"], "job_due");
+        assert_eq!(value["operation"]["value"]["payload"]["job_id"], 7);
+        for input in [
+            sdk::EventInput {
+                name: "undeclared_event".into(),
+                payload: serde_json::Value::Null,
+            },
+            sdk::EventInput {
+                name: "../invalid".into(),
+                payload: serde_json::Value::Null,
+            },
+            sdk::EventInput {
+                name: "job_due".into(),
+                payload: serde_json::json!("x".repeat(256 * 1024)),
+            },
+        ] {
+            assert!(
+                runtime
+                    .event(&bytes, Records, &["records".into()], input)
+                    .is_err()
+            );
+        }
     }
     #[test]
     fn traps_and_exhausted_fuel_do_not_poison_subsequent_calls() {

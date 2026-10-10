@@ -122,14 +122,35 @@ pub struct ContextContribution {
     pub disabled_tools: Vec<String>,
 }
 
+/// Host-triggered callback data. Authority remains outside this envelope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventInput {
+    pub name: String,
+    pub payload: serde_json::Value,
+}
+
 /// Plugins implement their feature behavior here.
 pub trait Plugin {
-    fn tools() -> Vec<Tool>;
-    fn execute(name: &str, arguments: serde_json::Value) -> Result<Outcome, String>;
+    fn tools() -> Vec<Tool> {
+        Vec::new()
+    }
+    /// Event names must exactly match the executable manifest contributions.
+    fn events() -> Vec<String> {
+        Vec::new()
+    }
+    fn execute(_name: &str, _arguments: serde_json::Value) -> Result<Outcome, String> {
+        Err("This plugin does not provide tool handlers".into())
+    }
     /// Read-only planning hook, evaluated before model tool selection. The host
     /// enforces its context budget and denies mutating capability calls.
     fn context(_input: ContextInput) -> Result<ContextContribution, String> {
         Ok(ContextContribution::default())
+    }
+    /// Event handlers own their behavior and use the same granted primitives as
+    /// tools. They are not advertised as tools to the model.
+    fn event(_input: EventInput) -> Result<Outcome, String> {
+        Err("This plugin does not handle host events".into())
     }
 }
 
@@ -153,6 +174,10 @@ macro_rules! export {
                 $crate::serde_json::to_string(&<$plugin as $crate::Plugin>::tools())
                     .expect("serializable tool definitions")
             }
+            fn events() -> String {
+                $crate::serde_json::to_string(&<$plugin as $crate::Plugin>::events())
+                    .expect("serializable event definitions")
+            }
             fn execute(name: String, arguments: String) -> Result<String, String> {
                 let arguments = $crate::serde_json::from_str(&arguments)
                     .map_err(|error| error.to_string())?;
@@ -163,6 +188,12 @@ macro_rules! export {
                 let input = $crate::serde_json::from_str(&input)
                     .map_err(|error| error.to_string())?;
                 let result = <$plugin as $crate::Plugin>::context(input)?;
+                $crate::serde_json::to_string(&result).map_err(|error| error.to_string())
+            }
+            fn event(input: String) -> Result<String, String> {
+                let input = $crate::serde_json::from_str(&input)
+                    .map_err(|error| error.to_string())?;
+                let result = <$plugin as $crate::Plugin>::event(input)?;
                 $crate::serde_json::to_string(&result).map_err(|error| error.to_string())
             }
         }

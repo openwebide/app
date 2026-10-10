@@ -154,6 +154,7 @@ async fn invoke_inner<T: PluginTransport, S: PluginServices>(
     services: &S,
     call: InvokePlugin,
 ) -> Result<ToolOutcome, String> {
+    call.validate_event()?;
     let context = matches!(
         call.operation,
         openwebide_core::plugins::execution::PluginOperation::Context
@@ -403,6 +404,7 @@ mod tests {
     }
     fn plugin() -> PreparedPlugin {
         let mut plugin = openwebide_core::plugins::testing::receipt();
+        plugin.manifest.contributions.events = vec!["job_due".into()];
         plugin.manifest.compatibility.plugin_api = 3;
         plugin.manifest.executable = Some(openwebide_core::plugins::RustPlugin {
             manifest: "Cargo.toml".into(),
@@ -417,6 +419,64 @@ mod tests {
             requires_approval: false,
         }];
         plugin
+    }
+    #[test]
+    fn events_share_the_invocation_workflow_and_validate_before_transport_effects() {
+        block_on(async {
+            let transport = Transport::default();
+            transport.steps.lock().unwrap().extend([
+                PluginInvocation {id:"event".into(),step:PluginStep::Ready},
+                PluginInvocation {id:"event".into(),step:PluginStep::HostCall {
+                    sequence:1,capability:"records".into(),payload:serde_json::json!({"collection":"events","operation":{"action":"create","value":{"job_id":7}}}).to_string(),
+                }},
+                PluginInvocation {id:"event".into(),step:PluginStep::Complete {ok:true,content:"Plugin event result".into(),summary:"Handled".into()}},
+            ]);
+            let services = Services::default();
+            let call = InvokePlugin {
+                operation: openwebide_core::plugins::execution::PluginOperation::Event,
+                prepared: plugin(),
+                name: String::new(),
+                arguments: serde_json::json!({"name":"job_due","payload":{"job_id":7}}).to_string(),
+            };
+            assert_eq!(
+                invoke_plugin(&transport, &services, call.clone())
+                    .await
+                    .unwrap()
+                    .content,
+                "Plugin event result"
+            );
+            assert_eq!(*services.calls.lock().unwrap(), 1);
+            assert_eq!(transport.replies.lock().unwrap().len(), 2);
+            assert!(transport.cancellations.lock().unwrap().is_empty());
+            for arguments in [
+                serde_json::json!({"name":"../invalid","payload":null}),
+                serde_json::json!({"name":"job_due","payload":null,"grant":"forged"}),
+                serde_json::json!({"name":"job_due","payload":"x".repeat(256*1024)}),
+            ] {
+                let invalid = InvokePlugin {
+                    arguments: arguments.to_string(),
+                    ..call.clone()
+                };
+                let error = invoke_plugin(&transport, &services, invalid)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    !error.contains("Disconnected"),
+                    "validation must precede transport calls"
+                );
+            }
+            let invalid = InvokePlugin {
+                name: "fixture_echo".into(),
+                ..call
+            };
+            assert!(
+                invoke_plugin(&transport, &services, invalid)
+                    .await
+                    .unwrap_err()
+                    .contains("tool name")
+            );
+            assert_eq!(*services.calls.lock().unwrap(), 1);
+        });
     }
     fn call() -> ToolCall {
         ToolCall {

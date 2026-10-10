@@ -8,6 +8,32 @@ pub enum PluginOperation {
     #[default]
     Tool,
     Context,
+    Event,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventInput {
+    pub name: String,
+    pub payload: serde_json::Value,
+}
+pub fn validate_event(name: &str, payload: &serde_json::Value) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+    {
+        return Err("Event names use 1–64 lowercase letters, digits or underscores".into());
+    }
+    if serde_json::to_vec(payload)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 256 * 1024
+    {
+        return Err("Plugin event data exceeds 256 KiB".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,6 +69,28 @@ pub struct InvokePlugin {
     pub prepared: PreparedPlugin,
     pub name: String,
     pub arguments: String,
+}
+impl InvokePlugin {
+    pub fn validate_event(&self) -> Result<(), String> {
+        if matches!(self.operation, PluginOperation::Event) {
+            if !self.name.is_empty() {
+                return Err("Event callbacks cannot supply a tool name".into());
+            }
+            let input: EventInput =
+                serde_json::from_str(&self.arguments).map_err(|error| error.to_string())?;
+            validate_event(&input.name, &input.payload)?;
+            if !self
+                .prepared
+                .manifest
+                .contributions
+                .events
+                .contains(&input.name)
+            {
+                return Err("Event is not declared by this plugin".into());
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1,6 +1,12 @@
 use openwebide_plugin_sdk::{Plugin, Tool, Outcome, serde_json::{self, json}};
 struct Fixture;
 impl Plugin for Fixture {
+    fn events()->Vec<String> { vec!["job_due".into()] }
+    fn event(input:openwebide_plugin_sdk::EventInput)->Result<Outcome,String> {
+        let operation=json!({"collection":"events","operation":{"action":"create","value":{"event":input.name,"payload":input.payload}}});
+        let response:serde_json::Value=openwebide_plugin_sdk::request("records",&operation)?;
+        Ok(Outcome {ok:true,content:response.to_string(),summary:"Plugin-owned event".into()})
+    }
     fn context(input: openwebide_plugin_sdk::ContextInput) -> Result<openwebide_plugin_sdk::ContextContribution, String> {
         if input.budget_bytes == 4 {
             let _:serde_json::Value=openwebide_plugin_sdk::request("completion",&json!({"system_prompt":"x","prompt":"y","max_output_tokens":64}))?;

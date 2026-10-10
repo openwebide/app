@@ -30,10 +30,24 @@ fn main() -> Result<()> {
     let bytes = build::compile(&source, library, staging.path())?;
     let runtime = Runtime::new()?;
     let tools = runtime.tools(&bytes, Fixtures(BTreeMap::new()), &[])?;
-    let declared: Vec<sdk::Tool> =
-        serde_json::from_value(manifest["contributions"]["tools"].clone())?;
+    let declared: Vec<sdk::Tool> = serde_json::from_value(
+        manifest["contributions"]
+            .get("tools")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )?;
     if serde_json::to_value(&tools)? != serde_json::to_value(&declared)? {
         bail!("Exported tool definitions differ from the manifest");
+    }
+    let events = runtime.events(&bytes)?;
+    let declared_events: Vec<String> = serde_json::from_value(
+        manifest["contributions"]
+            .get("events")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )?;
+    if events != declared_events {
+        bail!("Exported events differ from the manifest");
     }
     if let Some(tool) = arguments.next() {
         let input = arguments.next().context("Provide JSON tool arguments")?;
@@ -43,6 +57,15 @@ fn main() -> Result<()> {
         let services = Fixtures(serde_json::from_slice(&std::fs::read(fixtures)?)?);
         let grants: Vec<String> =
             serde_json::from_value(manifest["executable"]["capabilities"].clone())?;
+        if tool == "--event" {
+            let input = serde_json::from_str(&input)?;
+            let outcome = runtime.event(&bytes, services, &grants, input)?;
+            println!("{}", serde_json::to_string(&outcome)?);
+            if !outcome.ok {
+                bail!("Plugin event reported an unsuccessful result");
+            }
+            return Ok(());
+        }
         if tool == "--context" {
             let input = serde_json::from_str(&input)?;
             let contribution = runtime.context(&bytes, services, &grants, input)?;
@@ -59,8 +82,9 @@ fn main() -> Result<()> {
         }
     } else {
         println!(
-            "Validated {} exported tools ({} WASM bytes)",
+            "Validated {} exported tools and {} events ({} WASM bytes)",
             tools.len(),
+            events.len(),
             bytes.len()
         );
     }

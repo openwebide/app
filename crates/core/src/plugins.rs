@@ -107,6 +107,8 @@ pub struct PluginCompatibility {
 #[serde(deny_unknown_fields)]
 pub struct PluginContributions {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<PluginTool>,
     #[serde(default, rename = "toolGroups", skip_serializing_if = "Vec::is_empty")]
     pub tool_groups: Vec<PluginToolGroup>,
@@ -190,6 +192,7 @@ impl PluginManifest {
         if (self.contributions.skills.is_empty()
             && self.contributions.tool_groups.is_empty()
             && self.contributions.tools.is_empty())
+            && self.contributions.events.is_empty()
             || self.contributions.skills.len() > crate::skills::MAX_SKILLS
             || self.contributions.tool_groups.len() > 4
             || self
@@ -206,6 +209,25 @@ impl PluginManifest {
             ));
         }
         let executable = self.executable.as_ref();
+        if self.contributions.events.len() > 100
+            || (!self.contributions.events.is_empty() && executable.is_none())
+            || self
+                .contributions
+                .events
+                .iter()
+                .any(|name| execution::validate_event(name, &serde_json::Value::Null).is_err())
+            || self
+                .contributions
+                .events
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.contributions.events.len()
+        {
+            return Err(invalid(
+                "Host events require a Rust executable and unique supported event names.",
+            ));
+        }
         if executable.is_some() != (self.compatibility.plugin_api == 3)
             || (executable.is_none() && !self.contributions.tools.is_empty())
             || self.contributions.tools.len() > 100
@@ -242,7 +264,7 @@ impl PluginManifest {
                     .collect::<std::collections::BTreeSet<_>>()
                     .len()
                     != rust.capabilities.len()
-                || self.contributions.tools.is_empty()
+                || (self.contributions.tools.is_empty() && self.contributions.events.is_empty())
                 || !self.contributions.tool_groups.is_empty())
         {
             return Err(invalid(
@@ -842,6 +864,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn executable_event_contributions_do_not_require_model_tools() {
+        let mut manifest = testing::receipt().manifest;
+        manifest.compatibility.plugin_api = 3;
+        manifest.contributions.skills.clear();
+        manifest.contributions.tools.clear();
+        manifest.contributions.events = vec!["job_due".into()];
+        manifest.executable = Some(RustPlugin {
+            manifest: "Cargo.toml".into(),
+            library: "event_plugin".into(),
+            sdk_version: "0.1.0".into(),
+            capabilities: vec!["records".into()],
+        });
+        manifest.validate().unwrap();
+        manifest.contributions.events.push("job_due".into());
+        assert!(manifest.validate().is_err());
+        manifest.contributions.events = vec!["../invalid".into()];
+        assert!(manifest.validate().is_err());
+        manifest.contributions.events = vec!["job_due".into()];
+        manifest.executable = None;
+        manifest.compatibility.plugin_api = 2;
+        assert!(manifest.validate().is_err());
+    }
     #[test]
     fn rust_plugin_contract_requires_pinned_sdk_lockfile_and_executable_tools() {
         let mut value = serde_json::to_value(receipt().manifest).unwrap();

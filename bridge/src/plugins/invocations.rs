@@ -157,6 +157,7 @@ impl Invocations {
         call.prepared
             .validate()
             .map_err(|error| error.to_string())?;
+        call.validate_event()?;
         let rust = call
             .prepared
             .manifest
@@ -164,7 +165,7 @@ impl Invocations {
             .as_ref()
             .ok_or("Plugin has no executable")?;
         let declared = match call.operation {
-            PluginOperation::Context => call.name.is_empty(),
+            PluginOperation::Context | PluginOperation::Event => call.name.is_empty(),
             PluginOperation::Tool => call
                 .prepared
                 .manifest
@@ -277,6 +278,10 @@ impl Invocations {
                                 content: serde_json::to_string(&context)?,
                                 summary: "Plugin context".into(),
                             })
+                        }
+                        PluginOperation::Event => {
+                            let input = serde_json::from_str(&call.arguments)?;
+                            runtime.event(&bytes, services, &grants, input)
                         }
                     });
                     let step = match result {

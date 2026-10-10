@@ -397,6 +397,8 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
+- Connect declared SDK event callbacks to durable job delivery and run completion.
+  Add execution contexts for UI and background work without artificial chat sessions.
 - Extend authenticated, run-pinned private record callbacks with shared collection
   adapters beyond the existing Memory and Skills data adapters, job and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and

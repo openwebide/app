@@ -478,6 +478,14 @@ impl PluginHost for ScopedHost {
                         "Compiled tools do not match the manifest.".into(),
                     ));
                 }
+                let events = runtime
+                    .events(&bytes)
+                    .map_err(|error| host_error(format!("Invalid plugin events: {error:#}")))?;
+                if events != manifest.contributions.events {
+                    return Err(PluginError::Invalid(
+                        "Compiled events do not match the manifest.".into(),
+                    ));
+                }
                 // Build artifacts are disposable; retain only the validated component.
                 std::fs::remove_dir_all(&build_dir).map_err(io_error)?;
                 std::fs::write(stage.path().join("plugin.wasm"), &bytes).map_err(io_error)?;
@@ -1164,7 +1172,7 @@ mod rust_plugin_tests {
             "displayName":"Fixture","description":"SDK adapter contract","license":"MIT",
             "compatibility":{"pluginApi":3},
             "executable":{"manifest":"Cargo.toml","library":"sdk_fixture","sdkVersion":"0.1.0","capabilities":["records"]},
-            "contributions":{"skills":[],"tools":[{"name":"fixture_echo","description":"Exercise the public host contract.","parameters":{"type":"object","properties":{}},"requires_approval":false}]}
+            "contributions":{"skills":[],"events":["job_due"],"tools":[{"name":"fixture_echo","description":"Exercise the public host contract.","parameters":{"type":"object","properties":{}},"requires_approval":false}]}
         })).unwrap();
         let cargo = include_str!("../../crates/plugin-sdk/examples/fixture/Cargo.toml")
             .replace("{ path = \"../..\" }", "\"=0.1.0\"");
@@ -1213,6 +1221,58 @@ mod rust_plugin_tests {
             };
             exercise_records(&installer, owner, &prepared).await;
             let invocations = invocations::Invocations::default();
+            let event = invocations
+                .start(
+                    &installer,
+                    owner,
+                    execution::InvokePlugin {
+                        operation: execution::PluginOperation::Event,
+                        prepared: prepared.clone(),
+                        name: String::new(),
+                        arguments: serde_json::json!({"name":"job_due","payload":{"job_id":7}})
+                            .to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+            let event_import = invocations
+                .resume(
+                    owner,
+                    execution::ContinuePlugin {
+                        id: event.id.clone(),
+                        sequence: 0,
+                        response: Ok(String::new()),
+                    },
+                )
+                .await
+                .unwrap();
+            let execution::PluginStep::HostCall {
+                capability,
+                payload,
+                ..
+            } = event_import.step
+            else {
+                panic!("event did not execute plugin code")
+            };
+            assert_eq!(capability, "records");
+            let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(value["operation"]["value"]["event"], "job_due");
+            assert_eq!(value["operation"]["value"]["payload"]["job_id"], 7);
+            let event_result = invocations
+                .resume(
+                    owner,
+                    execution::ContinuePlugin {
+                        id: event.id,
+                        sequence: 1,
+                        response: Ok("{\"stored\":true}".into()),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                event_result.step,
+                execution::PluginStep::Complete { ok: true, .. }
+            ));
             let context = invocations
                 .start(
                     &installer,

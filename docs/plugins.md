@@ -139,7 +139,7 @@ when a plugin is missing, disabled or fails. Skill-only contributions may remain
 instructions/resources without an executable.
 
 The executable path ships Rust source and a committed Cargo.lock. API 3 declares
-the library, SDK version, capabilities and exported tool schemas. Installation
+the library, SDK version, capabilities, exported tool schemas and event names. Installation
 compiles source in isolation on the execution host, against its pinned compiler
 and embedded public SDK, then validates the exported schemas before activation.
 The artifact cache includes source, SDK and toolchain fingerprints. Compilation
@@ -172,6 +172,13 @@ authorize these shared collections. The SDK also exports a read-only context
 hook with an 8 KiB maximum contribution and the ability to disable only its own
 declared tools. Shared run preparation executes that hook on both execution hosts
 before model tool selection, including when model tools are disabled.
+
+Plugins can also declare `contributions.events` and export matching names through
+`Plugin::events()`. The host invokes `Plugin::event(EventInput)` through the same
+capability-gated workflow as tools, using a fresh WASM instance. Event payloads
+are bounded to 256 KiB; undeclared names are rejected before execution. An
+event-only plugin may export no model-facing tools. These callbacks provide the
+execution contract; durable queues, job delivery and scheduling remain unfinished.
 
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.
