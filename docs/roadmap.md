@@ -397,25 +397,12 @@ Extend agent and editor capabilities through versioned plugin packages that user
 and the agent can manage, without requiring changes to the app for each new
 capability.
 
-- Complete the Scheduling migration using raw SDK run submissions and durable
-  completion events; host dispatch, scoped conversation discovery, project events,
-  model pins and atomic terminal callbacks share the same queue, version pinning,
-  renewable leases and scoped callback authority. Task collection CRUD preserves
-  existing IDs/history and excludes plugin-owned records from legacy dispatch;
-  record prerequisites atomically reject stale new prompt submissions. Scoped history
-  bindings project raw-run progress and retain terminal snapshots after cleanup.
-  Declared background events now drive source-owned timer/run/deletion repair and
-  source-version handoff, through current enabled bindings in both host modes. Terminal
-  callback snapshots repair failed completion deliveries after raw-run cleanup.
-  Source-owned history retention preserves recent, current, active and legacy results
-  through bounded scans. Terminal job/run cleanup now preserves durable history and
-  rotates past blocked records; history retention repairs quota pressure. Finish
-  deployed cancellation/recovery verification,
-  then activate the executable release. Task and monitor mutations now share guarded
-  SDK actions with Memory; verify the deployed paired-host browser lifecycle and
-  the compiled defaults before removing transitional built-in handlers.
+- Activate the executable Scheduling release and verify deployed task/monitor
+  creation, cancellation, recovery and source-version handoff on server and paired
+  hosts. Verify history retention and quota recovery through the browser lifecycle
+  before removing transitional built-in handlers.
 - Extend authenticated, run-pinned private record callbacks with shared collection
-  adapters beyond the existing Memory and Skills data adapters and workspace primitives,
+  adapters for further app data and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and
   deployed compiled-default initialization. Marketplaces ship pinned Rust source and Cargo.lock;
   hosts compile against the declared SDK version and validate the WASM component

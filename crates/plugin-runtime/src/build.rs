@@ -4,6 +4,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -22,6 +23,18 @@ pub fn sdk_digest() -> String {
 /// The source directory must already be a verified immutable package snapshot.
 /// Outputs are kept separate from the snapshot and published only after validation.
 pub fn compile(source: &Path, output_name: &str, staging: &Path) -> Result<Vec<u8>> {
+    compile_cancellable(source, output_name, staging, &AtomicBool::new(false))
+}
+
+/// Cancellation stops dependency retrieval and compilation, including descendants.
+/// The caller retains the flag while awaiting the blocking compiler task.
+pub fn compile_cancellable(
+    source: &Path,
+    output_name: &str,
+    staging: &Path,
+    cancelled: &AtomicBool,
+) -> Result<Vec<u8>> {
+    check_cancelled(cancelled)?;
     if output_name.is_empty()
         || !output_name
             .bytes()
@@ -76,7 +89,8 @@ pub fn compile(source: &Path, output_name: &str, staging: &Path) -> Result<Vec<u
         .args(common)
         .arg(source.join("Cargo.toml"))
         .args(["--config", &patch]);
-    run(fetch, Duration::from_secs(180)).context("Fetch Rust plugin dependencies")?;
+    run_cancellable(fetch, Duration::from_secs(180), cancelled)
+        .context("Fetch Rust plugin dependencies")?;
     let mut build = sandbox(&cargo, &source, &work, &rustup_home, &sdk, false)?;
     configure(&mut build, &rustc, &rustup_home, &cargo_home, &work);
     build
@@ -84,7 +98,9 @@ pub fn compile(source: &Path, output_name: &str, staging: &Path) -> Result<Vec<u
         .args(common)
         .arg(source.join("Cargo.toml"))
         .args(["--target", TARGET, "--config", &patch]);
-    run(build, Duration::from_secs(600)).context("Compile Rust plugin in sandbox")?;
+    run_cancellable(build, Duration::from_secs(600), cancelled)
+        .context("Compile Rust plugin in sandbox")?;
+    check_cancelled(cancelled)?;
     let output = work
         .join("target")
         .join(TARGET)
@@ -319,7 +335,20 @@ fn copy_source(original: &Path, target: &Path, files: &mut usize, bytes: &mut u6
     }
     Ok(())
 }
-fn run(mut command: Command, timeout: Duration) -> Result<()> {
+fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
+    if cancelled.load(Ordering::Acquire) {
+        bail!("Plugin build was cancelled");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn run(command: Command, timeout: Duration) -> Result<()> {
+    run_cancellable(command, timeout, &AtomicBool::new(false))
+}
+
+fn run_cancellable(mut command: Command, timeout: Duration, cancelled: &AtomicBool) -> Result<()> {
+    check_cancelled(cancelled)?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -350,6 +379,7 @@ fn run(mut command: Command, timeout: Duration) -> Result<()> {
     });
     let started = Instant::now();
     let status = loop {
+        check_cancelled(cancelled)?;
         if let Some(status) = child.0.try_wait()? {
             break status;
         }
@@ -364,6 +394,7 @@ fn run(mut command: Command, timeout: Duration) -> Result<()> {
     let log = completed
         .recv_timeout(Duration::from_secs(1))
         .unwrap_or_default();
+    check_cancelled(cancelled)?;
     if !status.success() {
         bail!(
             "Plugin preparation failed ({status}): {}",
@@ -413,5 +444,36 @@ mod process_tests {
                 .contains("time limit")
         );
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn cancelled_build_stops_running_process_and_releases_its_log_pipe() {
+        let cancelled = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                cancelled.store(true, Ordering::Release);
+            });
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 30 & wait"]);
+            let started = Instant::now();
+            assert!(
+                run_cancellable(command, Duration::from_secs(30), &cancelled)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cancelled")
+            );
+            assert!(started.elapsed() < Duration::from_secs(3));
+        });
+    }
+
+    #[test]
+    fn cancellation_before_start_does_not_execute_build_code() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("executed");
+        let mut command = Command::new("/usr/bin/touch");
+        command.arg(&marker);
+        assert!(run_cancellable(command, Duration::from_secs(2), &AtomicBool::new(true)).is_err());
+        assert!(!marker.exists());
     }
 }

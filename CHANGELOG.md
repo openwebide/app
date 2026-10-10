@@ -9,13 +9,15 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add cancellation to the isolated Rust compiler primitive. Stop dependency retrieval and compilation with their child processes when cancelled, including before process startup. Install progress and UI cancellation still need wiring.
+
 - Clean up terminal Scheduling runs and event jobs through plugin-owned SDK handlers. Save run history before deletion, retain pending results and active work, and rotate bounded cleanup cursors past blocked records. History retention frees quota before raw cleanup retries; deployment remains in progress.
 
-- Bound Scheduling's completed task history in plugin source. Scan one page and remove at most three old entries per reconciliation tick; keep 128 recent entries plus current task results, active history and legacy records. Persist scan progress and recover interrupted cleanup through scoped SDK revisions. Job/run cleanup and deployment remain in progress.
+- Bound Scheduling's completed task history in plugin source. Scan one page and remove at most three old entries per reconciliation tick; keep 128 recent entries plus current task results, active history and legacy records. Persist scan progress and recover interrupted cleanup through scoped SDK revisions. Deployment remains in progress.
 
 - Record Scheduling preflight failures in task history when a conversation or model is unavailable. The Rust plugin advances recurring tasks, stops failed monitors and journals interrupted history writes for bounded reconciliation. Preserve prompts already accepted before configuration changes; deployment remains in progress.
 
-- Recover failed Scheduling completion deliveries from retained terminal callback snapshots, including after raw-run deletion. The Rust plugin saves task state and history before removing the callback; live deliveries remain with their worker. Retention, preflight reporting and deployment remain in progress.
+- Recover failed Scheduling completion deliveries from retained terminal callback snapshots, including after raw-run deletion. The Rust plugin saves task state and history before removing the callback; live deliveries remain with their worker. Deployment remains in progress.
 
 - Select real Rust Web, Memory, Scheduling and Skill Authoring implementations for new bundled defaults. Distribution builds compile them through the normal compiler sandbox, verify public exports and embed source/SDK/toolchain-pinned WASM for offline server and paired-host installation. Preserve existing version choices, removals and project opt-outs; existing transitional installations require a reviewed update. Production image/browser rollout remains in progress.
 
