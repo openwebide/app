@@ -60,6 +60,13 @@ jobs:
       - name: Clippy (bridge)
         run: cargo clippy -p openwebide-bridge --all-targets -- -D warnings
 
+      - name: Compile and verify offline executable defaults
+        env:
+          OPENWEBIDE_BUNDLED_ARTIFACTS: ${{ runner.temp }}/bundled-plugins.json
+        run: |
+          cargo run -p openwebide-plugin-runtime --bin openwebide-bundle-plugins --locked -- bridge/bundled/plugins.json "$OPENWEBIDE_BUNDLED_ARTIFACTS"
+          cargo test -p openwebide-bridge --features bundled-defaults bundled_tests
+
       - name: Tests (native)
         run: cargo test -p openwebide-core -p openwebide-llm -p openwebide-storage -p openwebide-agent -p openwebide-auth -p openwebide-bridge -p openwebide-backend -p openwebide-plugin-sdk -p openwebide-plugin-runtime -p openwebide-plugin-build --features openwebide-core/editor-parser
 

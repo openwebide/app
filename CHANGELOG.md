@@ -9,7 +9,9 @@ for what's still ahead.
 
 ## [Unreleased]
 
-- Route Tasks create, edit, pause/resume and delete, plus monitor mutations, through declared SDK tools in the shared host facade. Preserve projectless scope, titles on enablement and conversation-scoped monitor cancellation. Monitor flyout refreshes only read owned data; local unattended work uses the shared host folder binding. Executable defaults and deployed paired-host verification remain in progress.
+- Select real Rust Web, Memory, Scheduling and Skill Authoring implementations for new bundled defaults. Distribution builds compile them through the normal compiler sandbox, verify public exports and embed source/SDK/toolchain-pinned WASM for offline server and paired-host installation. Preserve existing version choices, removals and project opt-outs; existing transitional installations require a reviewed update. Production image/browser rollout remains in progress.
+
+- Route Tasks create, edit, pause/resume and delete, plus monitor mutations, through declared SDK tools in the shared host facade. Preserve projectless scope, titles on enablement and conversation-scoped monitor cancellation. Monitor flyout refreshes only read owned data; local unattended work uses the shared host folder binding. Deployed paired-host verification remains in progress.
 
 - Deliver declared periodic plugin background events through the shared leased queue on both host modes, using current enabled source bindings and sessionless grants. Preserve deadlines across restarts, revoke replaced background actors and reserve recovery capacity even when the user job queue is full. The unlisted Scheduling source repairs interrupted timers, run bookkeeping, deletion and source-version handoffs; retention and deployment remain in progress.
 
@@ -37,7 +39,7 @@ for what's still ahead.
 
 - Prepare pinned Rust plugins on the selected execution host before agent tools, context hooks and event callbacks. Validate source, manifest and digest before execution, supporting cold caches and offline reuse through the same shared workflow.
 
-- Route Memory UI mutations through declared executable-plugin actions, sharing grants, validation, cancellation and stale-result guards with agent execution. Preserve explicit manual editing while automatic Memory context is disabled. Executable defaults and deployment remain in progress.
+- Route Memory UI mutations through declared executable-plugin actions, sharing grants, validation, cancellation and stale-result guards with agent execution. Preserve explicit manual editing while automatic Memory context is disabled. Deployment remains in progress.
 
 - Select paired plugin hosts independently of local workspace folder mapping, allowing plugin installation and execution when only the browser can access the project folder. Command and Git operations retain their existing mapping checks.
 
@@ -59,7 +61,7 @@ for what's still ahead.
 
 - Add capability-gated CRUD for existing Memory UI records and read-only Rust SDK context hooks on the host protocol. Keep search and context policy in Memory plugin source; default migration and full lifecycle verification remain in progress.
 
-- Compile plugin source in normal Linux containers using an unprivileged compiler launcher with filesystem and syscall restrictions. Isolate dependency retrieval, retain macOS/native Linux build adapters, and package the pinned compiler and launcher. Offline executable defaults and first-party migrations remain in progress.
+- Compile plugin source in normal Linux containers using an unprivileged compiler launcher with filesystem and syscall restrictions. Isolate dependency retrieval, retain macOS/native Linux build adapters, and package the pinned compiler and launcher. Production verification and first-party migration rollout remain in progress.
 
 - Authorize executable plugin callbacks with account/session/project grants pinned to the selected source and capabilities. Verify real compiled WASM record writes and reads on server and paired hosts; share plugin planning before model tool selection. Browser HTTP lifecycle verification and first-party migrations remain in progress.
 
@@ -67,7 +69,7 @@ for what's still ahead.
 
 - Add transactional plugin-owned record storage with account/project/plugin namespaces, revision checks, bounded pages and quotas, plus an isolated Rust source authoring checker. Shared collection adapters and first-party migrations remain in progress.
 
-- Add Rust plugin SDK and isolated source-to-WASM preparation foundations, with a shared executable-tool workflow for server and paired hosts. General persistence/job capabilities, first-party behavior migration and offline executable defaults remain unfinished.
+- Add Rust plugin SDK and isolated source-to-WASM preparation foundations, with a shared executable-tool workflow for server and paired hosts. First-party deployment and complete lifecycle verification remain unfinished.
 
 - Retry transient Chrome/ChromeDriver setup failures up to three times in both frontend CI jobs, requiring executable browser and driver paths before testing.
 

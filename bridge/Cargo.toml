@@ -14,6 +14,7 @@ path = "src/main.rs"
 [features]
 default = ["tls"]
 tls = ["dep:hyper-rustls"]
+bundled-defaults = []
 
 [dependencies]
 thiserror = { workspace = true }

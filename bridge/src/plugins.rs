@@ -452,6 +452,8 @@ impl PluginHost for ScopedHost {
             let artifact = self.artifact(source, digest);
             let snapshot = self.snapshot(source, digest);
             let manifest = manifest.clone();
+            let source = source.clone();
+            let digest = digest.to_owned();
             tokio::task::spawn_blocking(move || {
                 if artifact.exists() {
                     load_artifact(&artifact)?;
@@ -460,36 +462,31 @@ impl PluginHost for ScopedHost {
                 let parent = artifact.parent().expect("artifact parent");
                 create_directory(parent)?;
                 let stage = tempfile::tempdir_in(parent).map_err(io_error)?;
-                let rust = manifest.executable.as_ref().expect("Rust manifest");
                 let build_dir = stage.path().join("build");
-                std::fs::create_dir(&build_dir).map_err(io_error)?;
-                let bytes =
+                let bytes = if let Some(bytes) = bundled_component(&source, &digest)? {
+                    bytes
+                } else {
+                    if cfg!(feature = "bundled-defaults") && bundled_files(&source).is_some() {
+                        return Err(host_error(
+                            "The distribution is missing a compatible compiled default. Rebuild its plugin bundle.",
+                        ));
+                    }
+                    let rust = manifest.executable.as_ref().expect("Rust manifest");
+                    std::fs::create_dir(&build_dir).map_err(io_error)?;
                     openwebide_plugin_runtime::build::compile(&snapshot, &rust.library, &build_dir)
-                        .map_err(|error| host_error(format!("{error:#}")))?;
+                        .map_err(|error| host_error(format!("{error:#}")))?
+                };
                 let runtime = openwebide_plugin_runtime::Runtime::new()
                     .map_err(|error| host_error(error.to_string()))?;
-                let tools = runtime
-                    .tools(&bytes, NoPluginServices, &[])
-                    .map_err(|error| host_error(format!("Invalid plugin interface: {error:#}")))?;
-                let tools: Vec<openwebide_core::plugins::PluginTool> = serde_json::from_value(
-                    serde_json::to_value(tools).map_err(|error| host_error(error.to_string()))?,
-                )
-                .map_err(|error| host_error(error.to_string()))?;
-                if tools != manifest.contributions.tools {
-                    return Err(PluginError::Invalid(
-                        "Compiled tools do not match the manifest.".into(),
-                    ));
-                }
-                let events = runtime
-                    .events(&bytes)
-                    .map_err(|error| host_error(format!("Invalid plugin events: {error:#}")))?;
-                if events != manifest.contributions.events {
-                    return Err(PluginError::Invalid(
-                        "Compiled events do not match the manifest.".into(),
-                    ));
-                }
+                runtime
+                    .validate_exports(&bytes, &manifest)
+                    .map_err(|error| {
+                        PluginError::Invalid(format!("Invalid plugin interface: {error:#}"))
+                    })?;
                 // Build artifacts are disposable; retain only the validated component.
-                std::fs::remove_dir_all(&build_dir).map_err(io_error)?;
+                if build_dir.exists() {
+                    std::fs::remove_dir_all(&build_dir).map_err(io_error)?;
+                }
                 std::fs::write(stage.path().join("plugin.wasm"), &bytes).map_err(io_error)?;
                 std::fs::write(
                     stage.path().join("digest"),
@@ -539,11 +536,21 @@ impl PluginHost for ScopedHost {
     }
 }
 
-struct NoPluginServices;
-impl openwebide_plugin_runtime::HostServices for NoPluginServices {
-    fn request(&mut self, _capability: &str, _payload: &str) -> Result<String, String> {
-        Err("Host capabilities are unavailable during interface validation.".into())
-    }
+fn bundled_component(source: &PluginSource, digest: &str) -> Result<Option<Vec<u8>>, PluginError> {
+    use openwebide_plugin_runtime::bundled::CompiledBundle;
+    static BUNDLE: std::sync::LazyLock<Result<CompiledBundle, String>> =
+        std::sync::LazyLock::new(|| {
+            serde_json::from_slice(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/bundled-artifacts.json"
+            )))
+            .map_err(|error| error.to_string())
+        });
+    BUNDLE
+        .as_ref()
+        .map_err(|error| host_error(error.clone()))?
+        .component(source, digest)
+        .map_err(|error| host_error(format!("{error:#}")))
 }
 fn load_artifact(path: &Path) -> Result<Vec<u8>, PluginError> {
     reject_link(path)?;
@@ -999,6 +1006,19 @@ mod tests {
 #[cfg(test)]
 mod bundled_tests {
     use super::*;
+    #[test]
+    fn selected_defaults_supply_source_owned_behavior() {
+        for source in openwebide_core::plugins::bundled_plugin_sources() {
+            let files = bundled_files(&source).expect("Selected source is embedded");
+            let manifest = openwebide_core::plugins::validate_files(&files).unwrap();
+            assert!(manifest.executable.is_some());
+            assert!(manifest.contributions.tool_groups.is_empty());
+            assert!(!manifest.contributions.tools.is_empty());
+            assert!(files.iter().any(|file| file.path == "Cargo.lock"));
+            assert!(files.iter().any(|file| file.path == "src/lib.rs"));
+        }
+    }
+    #[cfg(feature = "bundled-defaults")]
     #[tokio::test]
     async fn bundled_core_plugins_prepare_offline_on_both_hosts_using_normal_validation() {
         let sources = openwebide_core::plugins::bundled_plugin_sources();
@@ -1007,6 +1027,12 @@ mod bundled_tests {
             let root = tempfile::tempdir().unwrap();
             let installer = NativePluginInstaller::new(Some(root.path().to_path_buf()));
             for source in &sources {
+                let files = bundled_files(source).unwrap();
+                assert!(
+                    bundled_component(source, &openwebide_core::plugins::package_digest(&files))
+                        .unwrap()
+                        .is_some()
+                );
                 let prepared = installer
                     .prepare("owner", host.into(), source)
                     .await
@@ -1017,8 +1043,15 @@ mod bundled_tests {
                     .unwrap();
                 assert_eq!(package.prepared, prepared);
                 assert_eq!(prepared.host_id, host);
-                assert_eq!(prepared.manifest.contributions.tool_groups.len(), 1);
-                assert_eq!(prepared.manifest.version, "0.1.0");
+                assert!(prepared.manifest.contributions.tool_groups.is_empty());
+                assert_eq!(prepared.manifest.version, "0.2.0");
+                assert!(
+                    !installer
+                        .component("owner", &prepared)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
                 if prepared.manifest.name == "skill-authoring" {
                     assert_eq!(package.skills.len(), 1);
                 } else {

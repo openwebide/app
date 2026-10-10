@@ -410,11 +410,11 @@ capability.
   and complete cancellation/recovery verification,
   then activate the executable release. Task and monitor mutations now share guarded
   SDK actions with Memory; verify the deployed paired-host browser lifecycle and
-  executable defaults before removing transitional built-in handlers.
+  the compiled defaults before removing transitional built-in handlers.
 - Extend authenticated, run-pinned private record callbacks with shared collection
   adapters beyond the existing Memory and Skills data adapters and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and
-  offline compiled defaults. Marketplaces ship pinned Rust source and Cargo.lock;
+  deployed compiled-default initialization. Marketplaces ship pinned Rust source and Cargo.lock;
   hosts compile against the declared SDK version and validate the WASM component
   before activation. Cache artifacts by source, SDK and toolchain. Publish the SDK
   distribution and source-authoring/custom-marketplace workflow, and verify the

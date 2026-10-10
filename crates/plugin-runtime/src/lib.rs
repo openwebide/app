@@ -1,5 +1,6 @@
 //! Host component runtime; every plugin uses the same imports and limits.
 pub mod build;
+pub mod bundled;
 pub use openwebide_plugin_sdk as sdk;
 
 use anyhow::{Context, Result, bail};
@@ -89,6 +90,22 @@ impl Runtime {
     }
     pub fn validate(&self, bytes: &[u8]) -> Result<()> {
         Component::new(&self.engine, bytes).context("Invalid plugin component")?;
+        Ok(())
+    }
+    /// Build-time bundles and installation use the same public export contract.
+    pub fn validate_exports(
+        &self,
+        bytes: &[u8],
+        manifest: &openwebide_core::plugins::PluginManifest,
+    ) -> Result<()> {
+        let tools: Vec<openwebide_core::plugins::PluginTool> =
+            serde_json::from_value(serde_json::to_value(self.tools(bytes, NoServices, &[])?)?)?;
+        if tools != manifest.contributions.tools {
+            bail!("Compiled tools do not match the manifest.");
+        }
+        if self.events(bytes)? != manifest.contributions.events {
+            bail!("Compiled events do not match the manifest.");
+        }
         Ok(())
     }
     fn instantiate<H: HostServices + 'static>(

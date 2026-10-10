@@ -9,7 +9,8 @@ the Installed gear menu. Uninstalling returns a plugin to Available. Listings sh
 source named Open WebIDE. Click a row’s name to inspect plugin details
 and use the gear menu to choose a release. Install it on the open project's
 execution host, or on the server host when no project is open. Plugins currently
-contribute agent skills and optional platform tool groups.
+contribute agent skills and host-executed Rust tools through the public SDK.
+Older platform tool-group installations remain transitional until users update.
 
 Execution hosts bundle a commit-pinned subset of the official marketplace: Web,
 Project Memory, Scheduling and Skill Authoring. Account initialization installs
@@ -23,13 +24,38 @@ sign-in and existing installations remain available, and refresh retries it.
 The selection is locked in `plugins/bundled.json`. `tools/bundle_plugins.py`
 materializes only those package directories from the pinned public Git commit,
 along with its MIT license. Docker builds regenerate the host snapshots; CI
-checks the committed snapshots against upstream. Native builds embed the checked-in
-snapshots so development builds and first installation need no network. Browsers
+checks the committed snapshots against upstream. Distribution builds compile each
+selected Rust plugin in the installation compiler sandbox, check its exported tools
+and events against its manifest, and embed the resulting WASM in the execution host.
+First installation of these defaults needs no network or compiler. Development
+builds without a compiled bundle embed source and compile it on installation. Browsers
 receive manifests and managed skills through the existing APIs; plugin files are
 prepared and published on execution hosts. Updates still use the marketplace.
 To change the baseline, edit the lock, run `python3 tools/bundle_plugins.py`, and
 commit the regenerated host snapshots. Use `--repository <upstream-clone>` to
 regenerate or check without network access.
+
+To produce a native host with offline executable defaults:
+
+```sh
+cargo run -p openwebide-plugin-runtime --bin openwebide-bundle-plugins --locked -- \
+  bridge/bundled/plugins.json /tmp/openwebide-bundled-plugins.json
+OPENWEBIDE_BUNDLED_ARTIFACTS=/tmp/openwebide-bundled-plugins.json \
+  cargo build -p openwebide-bridge --features bundled-defaults --release --locked
+```
+
+The build tool uses the pinned Rust toolchain and public SDK. Linux root/container
+builds require the `openwebide-plugin-build` helper alongside it; non-root Linux
+hosts require bubblewrap, and macOS uses the native compiler sandbox. Only matching
+source commits, package digests, SDK digests and toolchains reuse embedded artifacts.
+The installer still validates exports and publishes the same per-owner cache and
+receipt; execution uses normal capability grants. Custom plugins follow the same
+source compilation path rather than borrowing built-in behavior.
+
+`bundled-defaults` makes a distribution build fail if the compiled bundle is absent.
+Run `cargo test -p openwebide-bridge --features bundled-defaults bundled_tests` with
+the same environment variable to verify fresh server and paired-host caches. The
+compiled bundle is a generated build artifact; it is not committed to this repo.
 
 Installation enables a plugin across your existing projects by default. New
 projects inherit installed plugins too. **Disable for project** saves an opt-out;
