@@ -182,8 +182,21 @@ impl<D: Db> Store<D> {
             return Err(StorageError::NotFound("Record".into()));
         }
         let mut records = records;
-        let next = if records.len() > 8 {
-            records.truncate(8);
+        let total = records.len();
+        let mut bytes = 0;
+        let mut count = 0;
+        for record in records.iter().take(8) {
+            let size = serde_json::to_vec(record)
+                .map_err(|error| StorageError::Db(error.to_string()))?
+                .len();
+            if bytes + size > 1024 * 1024 && count > 0 {
+                break;
+            }
+            bytes += size;
+            count += 1;
+        }
+        let next = if count < total {
+            records.truncate(count);
             records.last().map(|record| record.id)
         } else {
             None

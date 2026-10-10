@@ -39,7 +39,16 @@ impl<D: Db> Store<D> {
         request: &RecordRequest,
         now: i64,
     ) -> Result<CollectionResult, StorageError> {
-        request.validate().map_err(StorageError::InvalidRequest)?;
+        let limit = if request.collection == "skills" {
+            // The existing skill schema admits 128 KiB of data; JSON escapes
+            // can expand resource text sixfold, plus the draft envelope.
+            1024 * 1024
+        } else {
+            openwebide_core::plugins::records::MAX_RECORD_BYTES
+        };
+        request
+            .validate_with_limit(limit)
+            .map_err(StorageError::InvalidRequest)?;
         if request.collection == "skills" {
             return self
                 .plugin_skills_in_transaction(user, session, request, now)

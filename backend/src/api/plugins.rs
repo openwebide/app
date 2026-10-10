@@ -161,7 +161,7 @@ pub(crate) async fn host_request(
         "/api/sessions",
     )?;
     let request: openwebide_core::plugins::execution::PluginHostRequest =
-        parse_json(read_body(req, 256 * 1024).await?)?;
+        parse_json(read_body(req, 4 * 1024 * 1024).await?)?;
     Ok(json_response(
         200,
         &state

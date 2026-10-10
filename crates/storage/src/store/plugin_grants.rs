@@ -356,6 +356,96 @@ mod tests {
                         .is_err()
                 );
                 assert!(store.plugin_host_request(user, session, &call(json!({"action":"delete","id":personal.id,"revision":personal.revision+1})), 7).await.is_err());
+                // Existing UI skills can approach 128 KiB before JSON escaping.
+                // Editing them through a plugin preserves full resource data.
+                let mut large = draft("large-ui-skill");
+                large.instructions = "I".repeat(30000);
+                large.resources = (0..3)
+                    .map(|index| openwebide_core::SkillResource {
+                        name: format!("references/{index}.txt"),
+                        content: "\u{1}".repeat(30000),
+                        binary: false,
+                    })
+                    .collect();
+                let initial = store
+                    .skill_command(
+                        user,
+                        project,
+                        &openwebide_core::SkillCommand::Create {
+                            draft: large.clone(),
+                        },
+                        false,
+                        7,
+                    )
+                    .await
+                    .unwrap()
+                    .entries
+                    .into_iter()
+                    .find(|entry| entry.draft.name == large.name)
+                    .unwrap();
+                large.description = "Updated through SDK persistence".into();
+                let update = call(
+                    json!({"action":"update","id":initial.id,"revision":initial.revision,"value":{"draft":large}}),
+                );
+                let raw: RecordRequest = serde_json::from_str(&update.payload).unwrap();
+                assert!(
+                    raw.validate().is_err(),
+                    "private records retain their smaller quota"
+                );
+                assert!(serde_json::to_vec(&update).unwrap().len() < 4 * 1024 * 1024);
+                store
+                    .plugin_host_request(user, session, &update, 7)
+                    .await
+                    .unwrap();
+                let saved = store
+                    .project_skills(user, project)
+                    .await
+                    .unwrap()
+                    .entries
+                    .into_iter()
+                    .find(|entry| entry.id == initial.id)
+                    .unwrap();
+                assert_eq!(saved.draft, large);
+                for index in 0..2 {
+                    let mut another = large.clone();
+                    another.name = format!("large-ui-{index}");
+                    store
+                        .skill_command(
+                            user,
+                            project,
+                            &openwebide_core::SkillCommand::Create { draft: another },
+                            false,
+                            7,
+                        )
+                        .await
+                        .unwrap();
+                }
+                let mut after = 0;
+                let mut seen = std::collections::BTreeSet::new();
+                loop {
+                    let body = store
+                        .plugin_host_request(
+                            user,
+                            session,
+                            &call(json!({"action":"list","after":after})),
+                            7,
+                        )
+                        .await
+                        .unwrap();
+                    assert!(body.len() <= 1024 * 1024 + 1024);
+                    assert!(serde_json::to_vec(&body).unwrap().len() < 4 * 1024 * 1024);
+                    let page: openwebide_core::plugins::records::CollectionResult =
+                        serde_json::from_str(&body).unwrap();
+                    for record in page.records {
+                        assert!(seen.insert(record.id), "no repeated page records");
+                    }
+                    let Some(next) = page.next else {
+                        break;
+                    };
+                    assert!(next > after);
+                    after = next;
+                }
+                assert_eq!(seen.len(), 12); // Ten originals, one disabled, three large.
                 store
                     .set_user_setting(user, &format!("project_skills_{project}"), "false")
                     .await

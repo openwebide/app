@@ -170,7 +170,10 @@ before model tool selection, including when model tools are disabled.
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.
 The host protects managed or disabled skills from mutation and omits disabled
-skills from reads. Pages hold at most eight skills to bound resource transfers.
+skills from reads. Pages hold at most eight skills and approximately 1 MiB of
+serialized records to bound resource transfers. Collection mutations support the
+existing 128 KiB skill data schema even when JSON escaping expands its payload;
+private records retain their 64 KiB value limit.
 Authoring, search and prompt policy stay in plugin source.
 
 Both host adapters prepare plugin tools through the shared run planner before

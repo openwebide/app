@@ -95,6 +95,12 @@ pub struct CollectionResult {
 
 impl RecordRequest {
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_limit(MAX_RECORD_BYTES)
+    }
+
+    /// Shared collections can admit their existing schema size without changing
+    /// private record quotas. The persistence adapter chooses the limit.
+    pub fn validate_with_limit(&self, max_value_bytes: usize) -> Result<(), String> {
         if self.collection.is_empty()
             || self.collection.len() > 64
             || !self.collection.bytes().all(|byte| {
@@ -128,9 +134,9 @@ impl RecordRequest {
             && serde_json::to_vec(value)
                 .map_err(|error| error.to_string())?
                 .len()
-                > MAX_RECORD_BYTES
+                > max_value_bytes
         {
-            return Err("Record value exceeds 64 KiB.".into());
+            return Err(format!("Record value exceeds {max_value_bytes} bytes."));
         }
         Ok(())
     }
