@@ -1,6 +1,14 @@
 use openwebide_plugin_sdk::{Plugin, Tool, Outcome, serde_json::{self, json}};
 struct Fixture;
 impl Plugin for Fixture {
+    fn context(input: openwebide_plugin_sdk::ContextInput) -> Result<openwebide_plugin_sdk::ContextContribution, String> {
+        let action = if input.budget_bytes == 1 { "create" } else { "list" };
+        let _: serde_json::Value = openwebide_plugin_sdk::request("records", &json!({"collection":"notes","operation":{"action":action}}))?;
+        Ok(openwebide_plugin_sdk::ContextContribution {
+            prompt: (input.budget_bytes != 3).then(|| "Stored fact".into()),
+            disabled_tools: vec![if input.budget_bytes == 3 { "another_plugin_tool" } else { "fixture_echo" }.into()],
+        })
+    }
     fn tools() -> Vec<Tool> {
         vec![Tool {
             name: "fixture_echo".into(), description: "Exercise the public host contract.".into(),

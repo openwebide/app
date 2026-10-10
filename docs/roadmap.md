@@ -398,16 +398,18 @@ and the agent can manage, without requiring changes to the app for each new
 capability.
 
 - Extend authenticated, run-pinned private record callbacks with shared collection
-  adapters, job and workspace primitives,
+  adapters beyond the existing Memory data adapter, job and workspace primitives,
   installation progress and cancellation, production compiler-image verification, and
   offline compiled defaults. Marketplaces ship pinned Rust source and Cargo.lock;
   hosts compile against the declared SDK version and validate the WASM component
   before activation. Cache artifacts by source, SDK and toolchain. Publish the SDK
   distribution and source-authoring/custom-marketplace workflow, and verify the
   complete install/run/update lifecycle through both host adapters.
-- Complete installation and run verification of the plugin-owned Web source,
-  then replace transitional Memory, Scheduling and Skill Authoring tool-group
-  feature switches with plugin-owned implementations.
+- Complete installation and run verification of the plugin-owned Web and Memory
+  sources. Connect Memory context to run planning and move model-assisted naming
+  into plugin code over a general completion primitive. Replace transitional
+  Scheduling and Skill Authoring tool-group feature switches with plugin-owned
+  implementations.
   Require the same public SDK, interfaces and privileges as community plugins:
   no first-party identity dispatch, built-in feature proxy or fallback. Keep host
   primitives general and feature policy in plugin code. Verify local/remote
@@ -418,7 +420,8 @@ capability.
   runtime contracts, capability grants and dependency/configuration validation.
   Build on the MCP client and [database-backed project skills](agent-skills.md);
   keep discovery and context loading bounded through deferred tool loading.
-  Add context/run hooks when needed. Core workspace tools remain built in.
+  Connect the read-only SDK context hook to the shared run planner and add further
+  run hooks when needed. Core workspace tools remain built in.
 - Add host-side update checks while all clients are closed, extending the existing
   Notify, Automatic compatible and Off policies. Persist check state and update
   availability, bound polling/retries, and surface results in the existing Plugins

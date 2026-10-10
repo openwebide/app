@@ -11,11 +11,42 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 wasmtime::component::bindgen!({path: "../plugin-sdk/wit", world: "plugin"});
 
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
-pub const CAPABILITIES: &[&str] = &["http", "records", "jobs", "workspace", "clock"];
+pub const CAPABILITIES: &[&str] = &[
+    "http",
+    "records",
+    "collections",
+    "jobs",
+    "workspace",
+    "clock",
+];
 
 /// Adapters implement general primitives, never feature-specific dispatch.
 pub trait HostServices: Send {
     fn request(&mut self, capability: &str, payload: &str) -> Result<String, String>;
+}
+
+struct ReadOnly<H>(H);
+impl<H: HostServices> HostServices for ReadOnly<H> {
+    fn request(&mut self, capability: &str, payload: &str) -> Result<String, String> {
+        let read = match capability {
+            "clock" => true,
+            "records" | "collections" => serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|value| value["operation"]["action"].as_str().map(str::to_owned))
+                .is_some_and(|action| matches!(action.as_str(), "list" | "read")),
+            _ => false,
+        };
+        if !read {
+            return Err("Plugin context hooks cannot mutate host state".into());
+        }
+        self.0.request(capability, payload)
+    }
+}
+struct NoServices;
+impl HostServices for NoServices {
+    fn request(&mut self, _: &str, _: &str) -> Result<String, String> {
+        Err("Plugin metadata cannot call host services".into())
+    }
 }
 
 struct State<H> {
@@ -153,6 +184,40 @@ impl Runtime {
         }
         Ok(serde_json::from_str(&json)?)
     }
+    pub fn context<H: HostServices + 'static>(
+        &self,
+        bytes: &[u8],
+        services: H,
+        grants: &[String],
+        mut input: sdk::ContextInput,
+    ) -> Result<sdk::ContextContribution> {
+        input.budget_bytes = input.budget_bytes.min(8192);
+        let (mut store, plugin) = self.instantiate(bytes, ReadOnly(services), grants)?;
+        let json = plugin
+            .call_context(&mut store, &serde_json::to_string(&input)?)?
+            .map_err(anyhow::Error::msg)?;
+        if json.len() > MAX_MESSAGE_BYTES {
+            bail!("Plugin context exceeds its limit");
+        }
+        let contribution: sdk::ContextContribution = serde_json::from_str(&json)?;
+        if contribution
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.len() > input.budget_bytes)
+        {
+            bail!("Plugin context exceeds its budget");
+        }
+        let tools = self.tools(bytes, NoServices, &[])?;
+        let mut disabled = std::collections::BTreeSet::new();
+        if contribution
+            .disabled_tools
+            .iter()
+            .any(|name| !disabled.insert(name) || !tools.iter().any(|tool| tool.name == *name))
+        {
+            bail!("Plugin context can disable only its own declared tools");
+        }
+        Ok(contribution)
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +309,34 @@ mod tests {
             .unwrap();
         assert!(outcome.ok);
         assert_eq!(outcome.content, "x".repeat(16_384));
+    }
+    #[test]
+    fn context_reads_require_grants_and_cannot_write_or_disable_other_tools() {
+        let runtime = Runtime::new().unwrap();
+        let bytes = fixture();
+        assert!(
+            runtime
+                .context(&bytes, Records, &[], sdk::ContextInput { budget_bytes: 64 })
+                .is_err()
+        );
+        let grants = ["records".into()];
+        let context = runtime
+            .context(
+                &bytes,
+                Records,
+                &grants,
+                sdk::ContextInput { budget_bytes: 64 },
+            )
+            .unwrap();
+        assert_eq!(context.prompt.as_deref(), Some("Stored fact"));
+        assert_eq!(context.disabled_tools, vec!["fixture_echo"]);
+        for budget_bytes in [1, 2, 3] {
+            assert!(
+                runtime
+                    .context(&bytes, Records, &grants, sdk::ContextInput { budget_bytes })
+                    .is_err()
+            );
+        }
     }
     #[test]
     fn traps_and_exhausted_fuel_do_not_poison_subsequent_calls() {

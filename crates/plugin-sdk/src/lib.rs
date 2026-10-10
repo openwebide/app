@@ -50,6 +50,20 @@ pub fn records<T: Serialize, R: serde::de::DeserializeOwned>(
     )
 }
 
+/// CRUD for app-visible project collections, using the same operation envelope
+/// as private records. This requires a separate `collections` grant. The host
+/// supplies project/account scope, schema validation and revision checks; plugin
+/// code supplies feature policy such as searching and formatting.
+pub fn collections<T: Serialize, R: serde::de::DeserializeOwned>(
+    collection: &str,
+    operation: &T,
+) -> Result<R, String> {
+    request(
+        "collections",
+        &serde_json::json!({"collection": collection, "operation": operation}),
+    )
+}
+
 /// The host independently validates names, schemas and requested capabilities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,10 +82,28 @@ pub struct Outcome {
     pub summary: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextInput {
+    pub budget_bytes: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextContribution {
+    pub prompt: Option<String>,
+    pub disabled_tools: Vec<String>,
+}
+
 /// Plugins implement their feature behavior here.
 pub trait Plugin {
     fn tools() -> Vec<Tool>;
     fn execute(name: &str, arguments: serde_json::Value) -> Result<Outcome, String>;
+    /// Read-only planning hook, evaluated before model tool selection. The host
+    /// enforces its context budget and denies mutating capability calls.
+    fn context(_input: ContextInput) -> Result<ContextContribution, String> {
+        Ok(ContextContribution::default())
+    }
 }
 
 /// Call a granted general host capability. The host supplies authority.
@@ -98,6 +130,12 @@ macro_rules! export {
                 let arguments = $crate::serde_json::from_str(&arguments)
                     .map_err(|error| error.to_string())?;
                 let result = <$plugin as $crate::Plugin>::execute(&name, arguments)?;
+                $crate::serde_json::to_string(&result).map_err(|error| error.to_string())
+            }
+            fn context(input: String) -> Result<String, String> {
+                let input = $crate::serde_json::from_str(&input)
+                    .map_err(|error| error.to_string())?;
+                let result = <$plugin as $crate::Plugin>::context(input)?;
                 $crate::serde_json::to_string(&result).map_err(|error| error.to_string())
             }
         }

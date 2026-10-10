@@ -123,6 +123,7 @@ impl<E, T: PluginTransport, S: PluginServices> PluginTools<E, T, S> {
         let mut invocation = self
             .transport
             .start(InvokePlugin {
+                operation: openwebide_core::plugins::execution::PluginOperation::Tool,
                 prepared: plugin.clone(),
                 name: call.name.clone(),
                 arguments: call.arguments.clone(),

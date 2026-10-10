@@ -1,7 +1,7 @@
 //! Bounded component actors; transports supply authenticated ownership.
 use super::NativePluginInstaller;
 use openwebide_core::plugins::execution::{
-    ContinuePlugin, InvokePlugin, PluginInvocation, PluginStep,
+    ContinuePlugin, InvokePlugin, PluginInvocation, PluginOperation, PluginStep,
 };
 use openwebide_plugin_runtime::{HostServices, MAX_MESSAGE_BYTES, Runtime};
 use std::{
@@ -118,15 +118,17 @@ impl Invocations {
             .executable
             .as_ref()
             .ok_or("Plugin has no executable")?;
-        if !call
-            .prepared
-            .manifest
-            .contributions
-            .tools
-            .iter()
-            .any(|tool| tool.name == call.name)
-            || call.arguments.len() > MAX_MESSAGE_BYTES
-        {
+        let declared = match call.operation {
+            PluginOperation::Context => call.name.is_empty(),
+            PluginOperation::Tool => call
+                .prepared
+                .manifest
+                .contributions
+                .tools
+                .iter()
+                .any(|tool| tool.name == call.name),
+        };
+        if !declared || call.arguments.len() > MAX_MESSAGE_BYTES {
             return Err(
                 "Tool is not declared by this plugin, or its arguments exceed the limit.".into(),
             );
@@ -215,8 +217,19 @@ impl Invocations {
                     sequence: 0,
                 };
                 tokio::task::spawn_blocking(move || {
-                    let result = Runtime::new().and_then(|runtime| {
-                        runtime.execute(&bytes, services, &grants, &call.name, &call.arguments)
+                    let result = Runtime::new().and_then(|runtime| match call.operation {
+                        PluginOperation::Tool => {
+                            runtime.execute(&bytes, services, &grants, &call.name, &call.arguments)
+                        }
+                        PluginOperation::Context => {
+                            let input = serde_json::from_str(&call.arguments)?;
+                            let context = runtime.context(&bytes, services, &grants, input)?;
+                            Ok(openwebide_plugin_runtime::sdk::Outcome {
+                                ok: true,
+                                content: serde_json::to_string(&context)?,
+                                summary: "Plugin context".into(),
+                            })
+                        }
                     });
                     let step = match result {
                         Ok(outcome) => PluginStep::Complete {

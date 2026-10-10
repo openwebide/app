@@ -36,9 +36,6 @@ fn main() -> Result<()> {
         bail!("Exported tool definitions differ from the manifest");
     }
     if let Some(tool) = arguments.next() {
-        if !tools.iter().any(|definition| definition.name == tool) {
-            bail!("Tool is not declared by this plugin");
-        }
         let input = arguments.next().context("Provide JSON tool arguments")?;
         let fixtures = arguments
             .next()
@@ -46,6 +43,15 @@ fn main() -> Result<()> {
         let services = Fixtures(serde_json::from_slice(&std::fs::read(fixtures)?)?);
         let grants: Vec<String> =
             serde_json::from_value(manifest["executable"]["capabilities"].clone())?;
+        if tool == "--context" {
+            let input = serde_json::from_str(&input)?;
+            let contribution = runtime.context(&bytes, services, &grants, input)?;
+            println!("{}", serde_json::to_string(&contribution)?);
+            return Ok(());
+        }
+        if !tools.iter().any(|definition| definition.name == tool) {
+            bail!("Tool is not declared by this plugin");
+        }
         let outcome = runtime.execute(&bytes, services, &grants, &tool, &input)?;
         println!("{}", serde_json::to_string(&outcome)?);
         if !outcome.ok {

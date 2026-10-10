@@ -158,6 +158,15 @@ Shared collection adapters, job and workspace callbacks, installation progress
 and cancellation, and compiled offline defaults still need implementation. API 2
 first-party plugins remain transitional.
 
+The separate `collections` capability exposes schema-validated CRUD for the
+app-visible `memories` collection. It preserves existing UI records and enforces
+the user's Memory switch, ownership, quotas and revision checks; it does not
+provide search, naming or context formatting. Private `records` grants do not
+authorize these shared collections. The SDK also exports a read-only context
+hook with an 8 KiB maximum contribution and the ability to disable only its own
+declared tools. The host protocol supports that hook on both execution hosts;
+connecting it to run preparation remains in progress.
+
 Both host adapters prepare plugin tools through the shared run planner before
 applying connection tool selection and model tool settings. A plugin without an
 advertised tool receives no execution grant. The installed version remains active
@@ -179,8 +188,10 @@ the network during compilation.
 
 Web's source reference implementation now lives in the plugins repository and
 uses only the public SDK HTTP primitive. Its API 3 release remains unlisted while
-installation and migration verification continue. Next migrate Memory, Scheduling
-and Skill Authoring. Verify the same behavior in
+installation and migration verification continue. Memory's source implementation
+now owns search, CRUD formatting and bounded context selection over the public
+collection primitive; it remains unlisted pending planning and lifecycle
+integration. Continue Scheduling and Skill Authoring. Verify the same behavior in
 local and remote modes, including cancellation, crashes, disablement and updates,
 before calling those migrations complete. Completion of executable plugins, MCP
 servers, dependencies, language, UI and editor contributions remains on the roadmap.

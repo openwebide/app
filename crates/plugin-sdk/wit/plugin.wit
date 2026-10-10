@@ -10,4 +10,5 @@ world plugin {
     import host;
     export tools: func() -> string;
     export execute: func(name: string, arguments: string) -> result<string, string>;
+    export context: func(input: string) -> result<string, string>;
 }

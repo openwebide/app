@@ -1213,11 +1213,95 @@ mod rust_plugin_tests {
             };
             exercise_records(&installer, owner, &prepared).await;
             let invocations = invocations::Invocations::default();
+            let context = invocations
+                .start(
+                    &installer,
+                    owner,
+                    execution::InvokePlugin {
+                        operation: execution::PluginOperation::Context,
+                        prepared: prepared.clone(),
+                        name: String::new(),
+                        arguments: "{\"budget_bytes\":64}".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let context_read = invocations
+                .resume(
+                    owner,
+                    execution::ContinuePlugin {
+                        id: context.id.clone(),
+                        sequence: 0,
+                        response: Ok(String::new()),
+                    },
+                )
+                .await
+                .unwrap();
+            let execution::PluginStep::HostCall {
+                capability,
+                payload,
+                ..
+            } = context_read.step
+            else {
+                panic!("context did not request its general record read");
+            };
+            assert_eq!(capability, "records");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&payload).unwrap()["operation"]["action"],
+                "list"
+            );
+            let complete = invocations
+                .resume(
+                    owner,
+                    execution::ContinuePlugin {
+                        id: context.id,
+                        sequence: 1,
+                        response: Ok("{}".into()),
+                    },
+                )
+                .await
+                .unwrap();
+            let execution::PluginStep::Complete {
+                content, ok: true, ..
+            } = complete.step
+            else {
+                panic!("context did not complete");
+            };
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&content).unwrap()["prompt"],
+                "Stored fact"
+            );
+            let mutation = invocations
+                .start(
+                    &installer,
+                    owner,
+                    execution::InvokePlugin {
+                        operation: execution::PluginOperation::Context,
+                        prepared: prepared.clone(),
+                        name: String::new(),
+                        arguments: "{\"budget_bytes\":1}".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let failed = invocations
+                .resume(
+                    owner,
+                    execution::ContinuePlugin {
+                        id: mutation.id,
+                        sequence: 0,
+                        response: Ok(String::new()),
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(failed.step, execution::PluginStep::Failed { .. }));
             let ready = invocations
                 .start(
                     &installer,
                     owner,
                     execution::InvokePlugin {
+                        operation: execution::PluginOperation::Tool,
                         prepared: prepared.clone(),
                         name: "fixture_echo".into(),
                         arguments: "{}".into(),
@@ -1274,6 +1358,7 @@ mod rust_plugin_tests {
                     &installer,
                     owner,
                     execution::InvokePlugin {
+                        operation: execution::PluginOperation::Tool,
                         prepared,
                         name: "fixture_echo".into(),
                         arguments: "{}".into(),

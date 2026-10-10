@@ -84,6 +84,15 @@ pub struct RecordResult {
     pub next: Option<i64>,
 }
 
+/// Shared project collections can be disabled by the user independently of
+/// plugin installation. Their values use the app's documented data schema.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CollectionResult {
+    pub enabled: bool,
+    pub records: Vec<Record>,
+    pub next: Option<i64>,
+}
+
 impl RecordRequest {
     pub fn validate(&self) -> Result<(), String> {
         if self.collection.is_empty()

@@ -222,9 +222,17 @@ impl PluginManifest {
                     .library
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                || rust.capabilities.len() > 5
+                || rust.capabilities.len() > 6
                 || rust.capabilities.iter().any(|name| {
-                    !["http", "records", "jobs", "workspace", "clock"].contains(&name.as_str())
+                    ![
+                        "http",
+                        "records",
+                        "collections",
+                        "jobs",
+                        "workspace",
+                        "clock",
+                    ]
+                    .contains(&name.as_str())
                 })
                 || rust
                     .capabilities

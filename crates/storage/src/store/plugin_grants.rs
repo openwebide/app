@@ -78,6 +78,11 @@ impl<D: Db> Store<D> {
                     let result = store.plugin_records_in_transaction(user, session, &namespace, &command, now).await?;
                     serde_json::to_string(&result).map_err(|error| StorageError::Db(error.to_string()))
                 }
+                "collections" => {
+                    let command: RecordRequest = serde_json::from_str(&request.payload).map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                    let result = store.plugin_collections_in_transaction(user, session, &command, now).await?;
+                    serde_json::to_string(&result).map_err(|error| StorageError::Db(error.to_string()))
+                }
                 _ => Err(StorageError::InvalidRequest("Plugin host capability unavailable".into())),
             }
         }).await
@@ -129,6 +134,173 @@ mod tests {
     }
     fn request(grant: &str) -> PluginHostRequest {
         PluginHostRequest {grant:grant.into(), capability:"records".into(), payload:json!({"collection":"notes","operation":{"action":"create","value":{"text":"owned"}}}).to_string()}
+    }
+    #[test]
+    fn shared_collection_grants_preserve_ui_data_revisions_and_opt_out_in_both_modes() {
+        block_on(async {
+            for mode in [WorkspaceMode::Local, WorkspaceMode::Remote] {
+                let store = Store::new(RusqliteDb::open_in_memory().unwrap());
+                store.migrate().await.unwrap();
+                let user = store
+                    .insert_user("owner", "hash", UserRole::Admin, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let project = store
+                    .create_project(
+                        &NewProject {
+                            name: "p".into(),
+                            mode,
+                            path: Some("p".into()),
+                        },
+                        user,
+                        0,
+                    )
+                    .await
+                    .unwrap()
+                    .id;
+                let session = store
+                    .create_session("s", None, None, Some(project), user, 0)
+                    .await
+                    .unwrap()
+                    .id;
+                let initial = store
+                    .memory_command(
+                        user,
+                        project,
+                        &openwebide_core::MemoryCommand::Create {
+                            auto_title: false,
+                            title: "Existing UI memory".into(),
+                            content: "Kept intact".into(),
+                        },
+                        false,
+                        1,
+                    )
+                    .await
+                    .unwrap()
+                    .entries
+                    .remove(0);
+                let plugin = receipt();
+                store
+                    .record_plugin(user, &installation(&plugin, None), 1)
+                    .await
+                    .unwrap();
+                let private_token = "a".repeat(32);
+                store
+                    .issue_plugin_grant(user, session, &plugin, &private_token, 2)
+                    .await
+                    .unwrap();
+                let call = |token: &str, operation| PluginHostRequest {
+                    grant: token.into(),
+                    capability: "collections".into(),
+                    payload: json!({"collection":"memories","operation":operation}).to_string(),
+                };
+                let list = json!({"action":"list"});
+                // Granting private persistence does not authorize app-visible data.
+                assert!(
+                    store
+                        .plugin_host_request(user, session, &call(&private_token, list.clone()), 3)
+                        .await
+                        .is_err()
+                );
+                let mut shared = plugin.clone();
+                shared.source.commit = "c".repeat(40);
+                shared.digest = "c".repeat(64);
+                shared.manifest.version = "0.2.0".into();
+                shared
+                    .manifest
+                    .executable
+                    .as_mut()
+                    .unwrap()
+                    .capabilities
+                    .push("collections".into());
+                let mut update = installation(&shared, Some(1));
+                update.approved_capabilities = vec!["collections".into()];
+                store.record_plugin(user, &update, 3).await.unwrap();
+                let token = "b".repeat(32);
+                store
+                    .issue_plugin_grant(user, session, &shared, &token, 4)
+                    .await
+                    .unwrap();
+                let read = store
+                    .plugin_host_request(user, session, &call(&token, list.clone()), 5)
+                    .await
+                    .unwrap();
+                let page: serde_json::Value = serde_json::from_str(&read).unwrap();
+                assert_eq!(page["records"][0]["id"], initial.id);
+                assert_eq!(page["records"][0]["value"]["content"], "Kept intact");
+                let edit = json!({"action":"update","id":initial.id,"revision":initial.revision,"value":{"title":"Plugin-edited","content":"Visible in UI","auto_title":false}});
+                store
+                    .plugin_host_request(user, session, &call(&token, edit.clone()), 6)
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .plugin_host_request(user, session, &call(&token, edit), 7)
+                        .await
+                        .is_err()
+                );
+                let ui = store.project_memories(user, project).await.unwrap();
+                assert_eq!(ui.entries[0].title, "Plugin-edited");
+                assert_eq!(ui.entries[0].revision, initial.revision + 1);
+                let invalid =
+                    json!({"action":"create","value":{"title":"ok","content":"bad","user_id":42}});
+                assert!(
+                    store
+                        .plugin_host_request(user, session, &call(&token, invalid), 7)
+                        .await
+                        .is_err()
+                );
+                for index in 0..33 {
+                    let create = json!({"action":"create","value":{"title":format!("Row {index}"),"content":"data"}});
+                    store
+                        .plugin_host_request(user, session, &call(&token, create), 8)
+                        .await
+                        .unwrap();
+                }
+                let first: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(user, session, &call(&token, list.clone()), 9)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(first["records"].as_array().unwrap().len(), 32);
+                let second: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(
+                            user,
+                            session,
+                            &call(&token, json!({"action":"list","after":first["next"]})),
+                            9,
+                        )
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(second["records"].as_array().unwrap().len(), 2);
+                store
+                    .memory_command(
+                        user,
+                        project,
+                        &openwebide_core::MemoryCommand::SetEnabled { enabled: false },
+                        false,
+                        10,
+                    )
+                    .await
+                    .unwrap();
+                let disabled: serde_json::Value = serde_json::from_str(
+                    &store
+                        .plugin_host_request(user, session, &call(&token, list), 11)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(disabled["enabled"], false);
+                assert_eq!(disabled["records"], json!([]));
+                assert!(store.plugin_host_request(user, session, &call(&token, json!({"action":"delete","id":initial.id,"revision":initial.revision+1})), 11).await.is_err());
+            }
+        });
     }
     #[test]
     fn execution_grants_pin_authority_through_updates_and_removal_in_both_modes() {

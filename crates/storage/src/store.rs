@@ -9,6 +9,7 @@ pub use goals::GoalTurnAssessment;
 mod host_admin;
 mod memories;
 mod model_setup;
+mod plugin_collections;
 mod plugin_grants;
 mod plugin_records;
 mod plugins;

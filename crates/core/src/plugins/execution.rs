@@ -2,9 +2,19 @@
 use super::PreparedPlugin;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginOperation {
+    #[default]
+    Tool,
+    Context,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvokePlugin {
+    #[serde(default)]
+    pub operation: PluginOperation,
     pub prepared: PreparedPlugin,
     pub name: String,
     pub arguments: String,
