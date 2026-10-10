@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Share plugin preparation policy across browser, Spin and native bridge clients. Use short start/status requests, common deadlines and cancellation cleanup for installation, cold action caches and bundled initialization. Reclaim completed results under queue pressure so repeated tool calls do not exhaust preparation capacity.
+
 - Show host preparation progress and a Cancel installation action in Plugins. Installation and frontend cold-cache actions share asynchronous preparation through server and paired transports; cancel pending requests and reject stale account/project results before recording receipts. Bound requests and preparation time, and preserve installed versions when preparation fails. Deployed lifecycle verification remains in progress.
 
 - Add authenticated asynchronous host preparation with start, status and cancel endpoints. Bound queued work and retained results, enforce owner isolation and a preparation deadline, and stop compiler work on cancellation or runtime shutdown.

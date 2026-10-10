@@ -410,9 +410,8 @@ capability.
   distribution and source-authoring/custom-marketplace workflow, and verify the
   complete install/run/update lifecycle through both host adapters.
 - Verify asynchronous installation through deployed server and paired-host
-  browsers, including compiler cancellation and deadline/error recovery. Migrate
-  the remaining native/WASI cold-cache clients to asynchronous preparation and
-  share their client policy with browser installation and actions.
+  browsers, including compiler cancellation and deadline/error recovery through
+  installation, cold action caches and bundled initialization.
 - Complete installation and run verification of the plugin-owned Web, Memory and
   Skill Authoring sources. Route existing Memory UI automatic naming through its
   plugin-owned completion workflow through a deployed executable default. Verify

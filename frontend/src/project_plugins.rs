@@ -21,22 +21,14 @@ impl PluginTransport {
         &self,
         command: &preparation::PreparationCommand,
     ) -> Result<preparation::PluginPreparation, String> {
-        let request = async {
-            match self {
-                Self::Remote(api, id) => {
-                    api.try_with_value(Clone::clone)
-                        .ok_or("Plugin host context changed")?
-                        .plugin_preparation(*id, command)
-                        .await
-                }
-                Self::Local(client) => client.preparation(command).await,
+        match self {
+            Self::Remote(api, id) => {
+                api.try_with_value(Clone::clone)
+                    .ok_or("Plugin host context changed")?
+                    .plugin_preparation(*id, command)
+                    .await
             }
-        };
-        let timeout = crate::util::sleep_ms(30_000);
-        futures::pin_mut!(request, timeout);
-        match futures::future::select(request, timeout).await {
-            futures::future::Either::Left((result, _)) => result,
-            futures::future::Either::Right(_) => Err("Plugin host request timed out.".into()),
+            Self::Local(client) => client.preparation(command).await,
         }
     }
     async fn package(&self, expected: &PreparedPlugin) -> Result<PluginPackage, String> {
@@ -51,24 +43,60 @@ impl PluginTransport {
     }
 }
 
-struct PreparationGuard {
-    transport: PluginTransport,
-    id: Option<String>,
+struct BrowserPreparationHost<'a> {
+    transport: send_wrapper::SendWrapper<PluginTransport>,
+    clock: send_wrapper::SendWrapper<web_sys::Performance>,
+    current: send_wrapper::SendWrapper<&'a dyn Fn() -> bool>,
+    cancelled: send_wrapper::SendWrapper<&'a dyn Fn() -> bool>,
+    progress: send_wrapper::SendWrapper<&'a dyn Fn(preparation::PreparationState)>,
 }
-impl Drop for PreparationGuard {
-    fn drop(&mut self) {
-        if let Some(id) = self.id.take() {
-            let transport = self.transport.clone();
-            spawn_local(async move {
-                let _ = transport
-                    .preparation(&preparation::PreparationCommand::Cancel { id })
-                    .await;
-            });
-        }
+impl preparation::PreparationClientHost for BrowserPreparationHost<'_> {
+    fn request<'a>(
+        &'a self,
+        command: &'a preparation::PreparationCommand,
+    ) -> preparation::PreparationFuture<'a, Result<preparation::PluginPreparation, String>> {
+        Box::pin(send_wrapper::SendWrapper::new(
+            self.transport.preparation(command),
+        ))
+    }
+    fn sleep(&self, milliseconds: u32) -> preparation::PreparationFuture<'_, ()> {
+        Box::pin(send_wrapper::SendWrapper::new(crate::util::sleep_ms(
+            i32::try_from(milliseconds).unwrap_or(i32::MAX),
+        )))
+    }
+    fn now_millis(&self) -> f64 {
+        self.clock.now()
+    }
+    fn active(&self) -> bool {
+        (self.current)()
+    }
+    fn cancelled(&self) -> bool {
+        (self.cancelled)()
+    }
+    fn progress(&self, state: preparation::PreparationState) {
+        (self.progress)(state);
+    }
+    fn abandon(&self, id: String) {
+        let transport = self.transport.clone();
+        let clock = self.clock.clone();
+        spawn_local(async move {
+            let cleanup = BrowserPreparationHost {
+                transport,
+                clock,
+                current: send_wrapper::SendWrapper::new(&|| true),
+                cancelled: send_wrapper::SendWrapper::new(&|| false),
+                progress: send_wrapper::SendWrapper::new(&|_| {}),
+            };
+            let _ = preparation::preparation_request(
+                &cleanup,
+                &preparation::PreparationCommand::Cancel { id },
+            )
+            .await;
+        });
     }
 }
 
-/// One preparation policy for installation and cold action caches on either host.
+/// Thin browser primitives for the shared preparation client policy.
 pub(crate) async fn prepare_on_host(
     transport: PluginTransport,
     source: &PluginSource,
@@ -76,80 +104,17 @@ pub(crate) async fn prepare_on_host(
     cancelled: impl Fn() -> bool,
     progress: impl Fn(preparation::PreparationState),
 ) -> Result<PreparedPlugin, String> {
-    use preparation::{PreparationCommand, PreparationState};
-    if !current() || cancelled() {
-        return Err("Plugin preparation was cancelled.".into());
-    }
-    let mut guard = PreparationGuard {
-        transport,
-        id: None,
-    };
     let clock = web_sys::window()
         .and_then(|window| window.performance())
         .ok_or("Plugin preparation clock is unavailable")?;
-    let started = clock.now();
-    progress(PreparationState::Queued);
-    let mut status = guard
-        .transport
-        .preparation(&PreparationCommand::Start {
-            source: source.clone(),
-        })
-        .await?;
-    status.validate().map_err(|error| error.to_string())?;
-    guard.id = Some(status.id.clone());
-    loop {
-        if clock.now() - started >= 900_000.0 {
-            return Err("Plugin preparation exceeded its time limit.".into());
-        }
-        if !current() || cancelled() {
-            return Err("Plugin preparation was cancelled.".into());
-        }
-        progress(status.state);
-        match status.state {
-            PreparationState::Ready => {
-                let prepared = status.prepared.ok_or("Missing prepared plugin receipt")?;
-                if prepared.source != *source {
-                    return Err("Plugin host returned a different source.".into());
-                }
-                guard.id = None;
-                return Ok(prepared);
-            }
-            PreparationState::Failed => {
-                return Err(status
-                    .error
-                    .unwrap_or_else(|| "Plugin preparation failed.".into()));
-            }
-            PreparationState::Cancelled => return Err("Plugin preparation was cancelled.".into()),
-            PreparationState::Queued | PreparationState::Preparing => {}
-        }
-        crate::util::sleep_ms(250).await;
-        if !current() || cancelled() {
-            return Err("Plugin preparation was cancelled.".into());
-        }
-        let id = guard
-            .id
-            .clone()
-            .ok_or("Plugin preparation is unavailable")?;
-        let command = PreparationCommand::Status { id: id.clone() };
-        let request = guard.transport.preparation(&command);
-        let invalidation = async {
-            loop {
-                if !current() || cancelled() {
-                    return Err("Plugin preparation was cancelled.".to_string());
-                }
-                crate::util::sleep_ms(50).await;
-            }
-        };
-        futures::pin_mut!(request, invalidation);
-        status = match futures::future::select(request, invalidation).await {
-            futures::future::Either::Left((result, _)) => result?,
-            futures::future::Either::Right((result, _)) => return result,
-        };
-        status.validate().map_err(|error| error.to_string())?;
-        if status.id != id {
-            return Err("Plugin host returned a different preparation.".into());
-        }
-    }
+    let adapter = BrowserPreparationHost {
+        transport: send_wrapper::SendWrapper::new(transport),
+        clock: send_wrapper::SendWrapper::new(clock),
+        current: send_wrapper::SendWrapper::new(&current),
+        cancelled: send_wrapper::SendWrapper::new(&cancelled),
+        progress: send_wrapper::SendWrapper::new(&progress),
+    };
+    preparation::prepare_on_host(&adapter, source).await
 }
 #[derive(Clone, Debug)]
 pub struct CatalogSelection {

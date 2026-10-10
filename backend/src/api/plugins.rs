@@ -9,6 +9,8 @@ pub(crate) struct PlanningHost<'a> {
     user: openwebide_core::UserId,
     session: i64,
     cancelled: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    cancelled_preparations: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    clock: std::time::Instant,
 }
 #[derive(Clone)]
 enum HostStore<'a> {
@@ -22,6 +24,8 @@ impl<'a> PlanningHost<'a> {
             user,
             session,
             cancelled: Default::default(),
+            cancelled_preparations: Default::default(),
+            clock: std::time::Instant::now(),
         }
     }
     fn store(&self) -> &openwebide_storage::Store<crate::state::AppDb> {
@@ -37,7 +41,15 @@ impl<'a> PlanningHost<'a> {
     ) -> Result<T, String> {
         send_plugin_rpc(self.store(), self.user, path, body).await
     }
+    async fn flush_preparations(&self) {
+        use openwebide_core::plugins::preparation::{PreparationCommand, preparation_request};
+        let ids = std::mem::take(&mut *self.cancelled_preparations.lock().unwrap());
+        for id in ids {
+            let _ = preparation_request(self, &PreparationCommand::Cancel { id }).await;
+        }
+    }
     pub async fn flush_cancelled(&self) {
+        self.flush_preparations().await;
         let ids = std::mem::take(&mut *self.cancelled.lock().unwrap());
         for id in ids {
             let _ = self
@@ -66,6 +78,37 @@ async fn send_plugin_rpc<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&response)
         .map_err(|_| "Plugin execution host returned an invalid response".into())
 }
+impl openwebide_core::plugins::preparation::PreparationClientHost for PlanningHost<'_> {
+    fn request<'a>(
+        &'a self,
+        command: &'a openwebide_core::plugins::preparation::PreparationCommand,
+    ) -> openwebide_core::plugins::preparation::PreparationFuture<
+        'a,
+        Result<openwebide_core::plugins::preparation::PluginPreparation, String>,
+    > {
+        Box::pin(async move {
+            self.send(
+                &format!("/plugins/prepare/{}", command.operation()),
+                command.host_payload(),
+            )
+            .await
+        })
+    }
+    fn sleep(
+        &self,
+        milliseconds: u32,
+    ) -> openwebide_core::plugins::preparation::PreparationFuture<'_, ()> {
+        Box::pin(spin_sdk::time::sleep(std::time::Duration::from_millis(
+            u64::from(milliseconds),
+        )))
+    }
+    fn now_millis(&self) -> f64 {
+        self.clock.elapsed().as_secs_f64() * 1000.0
+    }
+    fn abandon(&self, id: String) {
+        self.cancelled_preparations.lock().unwrap().push(id);
+    }
+}
 impl PlanningHost<'static> {
     pub fn owned(
         store: std::sync::Arc<openwebide_storage::Store<crate::state::AppDb>>,
@@ -77,13 +120,17 @@ impl PlanningHost<'static> {
             user,
             session,
             cancelled: Default::default(),
+            cancelled_preparations: Default::default(),
+            clock: std::time::Instant::now(),
         }
     }
 }
 impl openwebide_agent::plugins::execution::PluginTransport for PlanningHost<'_> {
     async fn ensure_prepared(&self, expected: &PreparedPlugin) -> Result<PreparedPlugin, String> {
-        self.send("/plugins/prepare", json!({"source":expected.source}))
-            .await
+        let result =
+            openwebide_core::plugins::preparation::prepare_on_host(self, &expected.source).await;
+        self.flush_preparations().await;
+        result
     }
 
     async fn start(
@@ -608,23 +655,11 @@ pub(super) async fn ensure_bundled_plugins(state: &AppState, user: UserId) {
         }
         let mut packages = Vec::new();
         for source in pending {
-            let (status, body) = crate::bridge::send(
-                &state.store,
-                "/plugins/prepare",
-                json!({"source":source,"user":user.get()}).to_string(),
-            )
-            .await?;
-            if status != 200 {
-                return Err(ApiError::bad_gateway("Bundled plugin host unavailable"));
-            }
-            let prepared: PreparedPlugin = serde_json::from_slice(&body)
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-            prepared
-                .validate()
-                .map_err(|error| ApiError::internal(error.to_string()))?;
-            if prepared.source != source {
-                return Err(ApiError::bad_gateway("Bundled plugin source mismatch"));
-            }
+            let adapter = PlanningHost::new(state, user, 0);
+            let result =
+                openwebide_core::plugins::preparation::prepare_on_host(&adapter, &source).await;
+            adapter.flush_preparations().await;
+            let prepared = result.map_err(ApiError::bad_gateway)?;
             let (status, body) = crate::bridge::send(
                 &state.store,
                 "/plugins/package",

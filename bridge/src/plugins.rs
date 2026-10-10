@@ -266,8 +266,16 @@ impl NativePluginInstaller {
         host_id: String,
         source: &PluginSource,
     ) -> Result<PreparedPlugin, PluginError> {
-        self.prepare_cancellable(owner, host_id, source, Arc::new(AtomicBool::new(false)))
+        source.validate()?;
+        let adapter = preparations::NativePreparationHost {
+            installer: self,
+            owner,
+            host_id,
+            clock: std::time::Instant::now(),
+        };
+        openwebide_core::plugins::preparation::prepare_on_host(&adapter, source)
             .await
+            .map_err(host_error)
     }
 
     pub(super) async fn prepare_cancellable(
