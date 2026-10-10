@@ -8,6 +8,7 @@ use openwebide_core::plugins::{
     MAX_PACKAGE_BYTES, MAX_PACKAGE_FILE_BYTES, MAX_PACKAGE_FILES, PackageFile, PackageFileKind,
     PluginError, PluginFuture, PluginHost, PluginSource, PreparedPlugin, prepare_plugin,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -15,6 +16,7 @@ use std::{
     time::Duration,
 };
 use tokio::{io::AsyncReadExt, process::Command, sync::Mutex};
+pub mod preparations;
 
 /// Only host binaries contain the bundled plugin files.
 fn bundled_files(source: &PluginSource) -> Option<Vec<PackageFile>> {
@@ -65,6 +67,7 @@ fn bundled_files(source: &PluginSource) -> Option<Vec<PackageFile>> {
 pub struct NativePluginInstaller {
     root: Option<PathBuf>,
     lock: Arc<Mutex<()>>,
+    pub(crate) preparations: preparations::Preparations,
 }
 impl Default for NativePluginInstaller {
     fn default() -> Self {
@@ -76,6 +79,7 @@ impl NativePluginInstaller {
         Self {
             root,
             lock: Arc::new(Mutex::new(())),
+            preparations: preparations::Preparations::default(),
         }
     }
 
@@ -99,6 +103,7 @@ impl NativePluginInstaller {
             return Err(host_error("Plugin cache path must be absolute."));
         }
         let host = ScopedHost {
+            cancelled: Arc::new(AtomicBool::new(false)),
             root: root.join(key(owner)),
             host_id: prepared.host_id.clone(),
         };
@@ -136,6 +141,7 @@ impl NativePluginInstaller {
             return Err(host_error("Plugin cache path must be absolute."));
         }
         let host = ScopedHost {
+            cancelled: Arc::new(AtomicBool::new(false)),
             root: root.join(key(owner)),
             host_id,
         };
@@ -160,6 +166,7 @@ impl NativePluginInstaller {
             return Err(host_error("Plugin cache path must be absolute."));
         }
         let host = ScopedHost {
+            cancelled: Arc::new(AtomicBool::new(false)),
             root: root.join(key(owner)),
             host_id: String::new(),
         };
@@ -259,8 +266,22 @@ impl NativePluginInstaller {
         host_id: String,
         source: &PluginSource,
     ) -> Result<PreparedPlugin, PluginError> {
+        self.prepare_cancellable(owner, host_id, source, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    pub(super) async fn prepare_cancellable(
+        &self,
+        owner: &str,
+        host_id: String,
+        source: &PluginSource,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<PreparedPlugin, PluginError> {
         source.validate()?;
         let _guard = self.lock.lock().await;
+        if cancelled.load(Ordering::Acquire) {
+            return Err(host_error("Plugin preparation was cancelled."));
+        }
         let root = self
             .root
             .as_ref()
@@ -271,6 +292,7 @@ impl NativePluginInstaller {
             ));
         }
         let host = ScopedHost {
+            cancelled,
             root: root.join(key(owner)),
             host_id,
         };
@@ -299,6 +321,7 @@ fn io_error(error: std::io::Error) -> PluginError {
 }
 
 struct ScopedHost {
+    cancelled: Arc<AtomicBool>,
     root: PathBuf,
     host_id: String,
 }
@@ -454,7 +477,11 @@ impl PluginHost for ScopedHost {
             let manifest = manifest.clone();
             let source = source.clone();
             let digest = digest.to_owned();
+            let cancelled = self.cancelled.clone();
             tokio::task::spawn_blocking(move || {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err(host_error("Plugin preparation was cancelled."));
+                }
                 if artifact.exists() {
                     load_artifact(&artifact)?;
                     return Ok(());
@@ -473,7 +500,7 @@ impl PluginHost for ScopedHost {
                     }
                     let rust = manifest.executable.as_ref().expect("Rust manifest");
                     std::fs::create_dir(&build_dir).map_err(io_error)?;
-                    openwebide_plugin_runtime::build::compile(&snapshot, &rust.library, &build_dir)
+                    openwebide_plugin_runtime::build::compile_cancellable(&snapshot, &rust.library, &build_dir, &cancelled)
                         .map_err(|error| host_error(format!("{error:#}")))?
                 };
                 let runtime = openwebide_plugin_runtime::Runtime::new()
@@ -483,6 +510,9 @@ impl PluginHost for ScopedHost {
                     .map_err(|error| {
                         PluginError::Invalid(format!("Invalid plugin interface: {error:#}"))
                     })?;
+                if cancelled.load(Ordering::Acquire) {
+                    return Err(host_error("Plugin preparation was cancelled."));
+                }
                 // Build artifacts are disposable; retain only the validated component.
                 if build_dir.exists() {
                     std::fs::remove_dir_all(&build_dir).map_err(io_error)?;
@@ -787,6 +817,7 @@ mod tests {
         );
 
         let scoped = ScopedHost {
+            cancelled: Arc::new(AtomicBool::new(false)),
             root: root.join(key(owner)),
             host_id: "host".into(),
         };
@@ -814,6 +845,7 @@ mod tests {
             assert_eq!(prepared.manifest.name, "pr-review");
             assert_eq!(prepared.host_id, id);
             let snapshot = ScopedHost {
+                cancelled: Arc::new(AtomicBool::new(false)),
                 root: root.path().join(key(owner)),
                 host_id: id.into(),
             }
@@ -844,6 +876,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let original = seed(root.path(), "seed");
         let host = ScopedHost {
+            cancelled: Arc::new(AtomicBool::new(false)),
             root: root.path().join(key("seed")),
             host_id: "seed".into(),
         };
@@ -938,6 +971,7 @@ mod tests {
             .await
             .unwrap();
         let snapshot = ScopedHost {
+            cancelled: Arc::new(AtomicBool::new(false)),
             root: root.path().join(key("paired")),
             host_id: "host".into(),
         }
@@ -1586,6 +1620,7 @@ mod rust_plugin_tests {
                 "paired"
             };
             let host = ScopedHost {
+                cancelled: Arc::new(AtomicBool::new(false)),
                 root: root.path().join(key(owner)),
                 host_id: host_id.into(),
             };
@@ -1854,6 +1889,7 @@ mod rust_plugin_tests {
             exercise_records(&installer, owner, &prepared).await;
         }
         let host = ScopedHost {
+            cancelled: Arc::new(AtomicBool::new(false)),
             root: root.path().join(key("user:1")),
             host_id: "server-host".into(),
         };

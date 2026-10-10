@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add authenticated asynchronous host preparation with start, status and cancel endpoints. Bound queued work and retained results, enforce owner isolation and a preparation deadline, and stop compiler work on cancellation or runtime shutdown. The shared install UI still needs to adopt these endpoints.
+
 - Add cancellation to the isolated Rust compiler primitive. Stop dependency retrieval and compilation with their child processes when cancelled, including before process startup. Install progress and UI cancellation still need wiring.
 
 - Clean up terminal Scheduling runs and event jobs through plugin-owned SDK handlers. Save run history before deletion, retain pending results and active work, and rotate bounded cleanup cursors past blocked records. History retention frees quota before raw cleanup retries; deployment remains in progress.

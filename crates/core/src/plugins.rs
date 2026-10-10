@@ -3,6 +3,7 @@ pub mod completion;
 pub mod execution;
 pub mod jobs;
 pub mod marketplace;
+pub mod preparation;
 pub mod records;
 pub mod runs;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::LazyLock};

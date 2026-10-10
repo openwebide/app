@@ -403,12 +403,16 @@ capability.
   before removing transitional built-in handlers.
 - Extend authenticated, run-pinned private record callbacks with shared collection
   adapters for further app data and workspace primitives,
-  installation progress and cancellation, production compiler-image verification, and
+  production compiler-image verification, and
   deployed compiled-default initialization. Marketplaces ship pinned Rust source and Cargo.lock;
   hosts compile against the declared SDK version and validate the WASM component
   before activation. Cache artifacts by source, SDK and toolchain. Publish the SDK
   distribution and source-authoring/custom-marketplace workflow, and verify the
   complete install/run/update lifecycle through both host adapters.
+- Wire the authenticated asynchronous host preparation endpoints and compiler
+  cancellation into the shared installation workflow. Show progress and a Cancel
+  action, stop abandoned or stale-scope work, and verify deadline/error recovery
+  through both browser transports.
 - Complete installation and run verification of the plugin-owned Web, Memory and
   Skill Authoring sources. Route existing Memory UI automatic naming through its
   plugin-owned completion workflow through a deployed executable default. Verify
