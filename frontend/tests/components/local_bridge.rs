@@ -1962,6 +1962,7 @@ async fn queued_local_prompt_is_consumed_once_with_its_captured_images_and_refer
                 1,
                 vec![openwebide_core::QueuedPrompt {
                     scheduled_task: None,
+                    plugin_run: None,
                     id: 1,
                     session_id: 1,
                     revision: 1,

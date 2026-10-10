@@ -399,12 +399,14 @@ pub(super) async fn build_run_plan(
     state.store.ensure_not_rewinding(session_id).await?;
     let session = state.store.get_session(session_id, user_id).await?;
     let task_model = match send.queued_prompt {
-        Some(key) => {
-            state
+        Some(key) => state
+            .store
+            .scheduled_prompt_model(user_id, session_id, key)
+            .await?
+            .or(state
                 .store
-                .scheduled_prompt_model(user_id, session_id, key)
-                .await?
-        }
+                .plugin_prompt_model(user_id, session_id, key)
+                .await?),
         None => None,
     };
     let connection_id = task_model

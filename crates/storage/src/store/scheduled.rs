@@ -382,7 +382,7 @@ impl<D: Db> Store<D> {
             let mut deliveries=Vec::new();
             for row in rows.rows {
                 store.db.execute("UPDATE scheduled_runs SET status='claimed',claimed_until=? WHERE id=? AND status='queued'", &[DbValue::Int(now+120),DbValue::Int(row.get_int(0)?)]).await?;
-                deliveries.push(TaskDelivery{run_id:row.get_int(0)?,task_id:row.get_int(1)?,user_id:row.get_int(2)?,session_id:row.get_int(3)?,prompt:openwebide_core::QueuedPrompt{scheduled_task:Some(row.get_int(1)?),id:row.get_int(4)?,revision:row.get_int(5)?,session_id:row.get_int(3)?,content:row.get_text(6)?.into(),created_at:row.get_int(7)?,guidance:false},binding:row.get_text_opt(8).map(|path|HostBinding{host_id:host.id.clone(),path:path.into()})});
+                deliveries.push(TaskDelivery{run_id:row.get_int(0)?,task_id:row.get_int(1)?,user_id:row.get_int(2)?,session_id:row.get_int(3)?,prompt:openwebide_core::QueuedPrompt{scheduled_task:Some(row.get_int(1)?),plugin_run:None,id:row.get_int(4)?,revision:row.get_int(5)?,session_id:row.get_int(3)?,content:row.get_text(6)?.into(),created_at:row.get_int(7)?,guidance:false},binding:row.get_text_opt(8).map(|path|HostBinding{host_id:host.id.clone(),path:path.into()})});
             }
             Ok(deliveries)
         }).await

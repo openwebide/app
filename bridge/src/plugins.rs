@@ -1265,6 +1265,43 @@ mod rust_plugin_tests {
             serde_json::from_str::<serde_json::Value>(&outcome.content).unwrap(),
             result
         );
+        // Raw run requests execute inside source code through normal callback grants.
+        let raw = executor.execute(&openwebide_core::ToolCall {
+            id: "raw-run".into(), name: "fixture_echo".into(),
+            arguments: serde_json::json!({"runs":{"action":"submit","key":"raw-one","prompt":"Source-owned prompt","target":{"kind":"origin"}}}).to_string(),
+        }).await;
+        assert!(raw.ok, "{}", raw.content);
+        let raw: openwebide_core::plugins::runs::RunResult =
+            serde_json::from_str(&raw.content).unwrap();
+        assert_eq!(
+            raw.runs[0].state,
+            openwebide_core::plugins::runs::RunState::Pending
+        );
+        assert_eq!(raw.runs[0].session_id, Some(session));
+        let pending = store
+            .list_queued_prompts(user, session)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(pending.plugin_run, Some(raw.runs[0].id));
+        assert!(
+            store
+                .consume_queued_prompt(user, session, pending.key(), &pending.content, 3)
+                .await
+                .is_err()
+        );
+        let cancelled = executor.execute(&openwebide_core::ToolCall {
+            id: "raw-cancel".into(), name: "fixture_echo".into(),
+            arguments: serde_json::json!({"runs":{"action":"cancel","id":raw.runs[0].id,"revision":raw.runs[0].revision}}).to_string(),
+        }).await;
+        assert!(cancelled.ok, "{}", cancelled.content);
+        assert!(
+            store
+                .list_queued_prompts(user, session)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // Public SDK code schedules a real durable event; delivery uses the same executor.
         let scheduled = executor.execute(&openwebide_core::ToolCall {
             id:"schedule".into(), name:"fixture_echo".into(),
@@ -1338,7 +1375,7 @@ mod rust_plugin_tests {
             "schemaVersion":1,"publisher":"example","name":"fixture","version":"0.1.0",
             "displayName":"Fixture","description":"SDK adapter contract","license":"MIT",
             "compatibility":{"pluginApi":3},
-            "executable":{"manifest":"Cargo.toml","library":"sdk_fixture","sdkVersion":"0.1.0","capabilities":["records","jobs"]},
+            "executable":{"manifest":"Cargo.toml","library":"sdk_fixture","sdkVersion":"0.1.0","capabilities":["records","jobs","runs"]},
             "contributions":{"skills":[],"events":["job_due"],"tools":[{"name":"fixture_echo","description":"Exercise the public host contract.","parameters":{"type":"object","properties":{}},"requires_approval":false}]}
         })).unwrap();
         let cargo = include_str!("../../crates/plugin-sdk/examples/fixture/Cargo.toml")

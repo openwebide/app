@@ -22,7 +22,7 @@ use crate::StorageError;
 use crate::db::Db;
 
 /// The highest schema version this build knows how to apply.
-pub const SCHEMA_VERSION: i64 = 50;
+pub const SCHEMA_VERSION: i64 = 51;
 
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS settings (
@@ -569,6 +569,19 @@ async fn apply_step<D: Db>(
                     .await?;
                 }
             }
+            Ok(())
+        }
+        51 => {
+            db.execute("CREATE TABLE IF NOT EXISTS plugin_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, project_scope INTEGER NOT NULL, plugin TEXT NOT NULL, run_key TEXT NOT NULL, request TEXT NOT NULL, prepared TEXT NOT NULL, context TEXT NOT NULL, host_id TEXT NOT NULL, session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL, queued_id INTEGER REFERENCES queued_prompts(id) ON DELETE SET NULL, message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL, model TEXT, state TEXT NOT NULL DEFAULT 'pending', revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, lease TEXT, lease_expires_at INTEGER, detail TEXT NOT NULL DEFAULT '', permission_id TEXT, UNIQUE(user_id,project_scope,plugin,run_key))", &[]).await?;
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS plugin_runs_pending ON plugin_runs(host_id,state,id)",
+                &[],
+            )
+            .await?;
+            db.execute("CREATE TRIGGER IF NOT EXISTS delete_project_plugin_runs AFTER DELETE ON projects BEGIN DELETE FROM queued_prompts WHERE id IN (SELECT queued_id FROM plugin_runs WHERE project_scope=OLD.id); DELETE FROM plugin_runs WHERE project_scope=OLD.id; END", &[]).await?;
+            db.execute("CREATE TRIGGER IF NOT EXISTS delete_plugin_run_queue AFTER DELETE ON plugin_runs BEGIN DELETE FROM queued_prompts WHERE id=OLD.queued_id; END", &[]).await?;
+            db.execute("CREATE TRIGGER IF NOT EXISTS cancel_plugin_run_queue BEFORE DELETE ON queued_prompts BEGIN UPDATE plugin_runs SET state='cancelled',revision=revision+1,detail='Queued prompt removed' WHERE queued_id=OLD.id AND state IN ('pending','leased') AND message_id IS NULL; END", &[]).await?;
+            db.execute("CREATE TRIGGER IF NOT EXISTS cancel_session_plugin_runs BEFORE DELETE ON sessions BEGIN UPDATE plugin_runs SET state=CASE WHEN message_id IS NULL THEN 'cancelled' ELSE 'interrupted' END,revision=revision+1,detail='Conversation removed',permission_id=NULL WHERE session_id=OLD.id AND state IN ('pending','leased','running','blocked','cancelling'); END", &[]).await?;
             Ok(())
         }
         other => Err(StorageError::Db(format!("unknown migration step {other}"))),

@@ -314,6 +314,19 @@ impl<D: Db> Store<D> {
                         return serde_json::to_string(&result)
                             .map_err(|error| StorageError::Db(error.to_string()));
                     }
+                    if request.capability == "runs" {
+                        let command: openwebide_core::plugins::runs::RunRequest =
+                            serde_json::from_str(&request.payload)
+                                .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+                        let context = store
+                            .plugin_job_origin_context(user, &request.grant, &context)
+                            .await?;
+                        let result = store
+                            .plugin_runs_in_transaction(user, &plugin, &context, &command, now)
+                            .await?;
+                        return serde_json::to_string(&result)
+                            .map_err(|error| StorageError::Db(error.to_string()));
+                    }
                     let command: RecordRequest = serde_json::from_str(&request.payload)
                         .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
                     match request.capability.as_str() {

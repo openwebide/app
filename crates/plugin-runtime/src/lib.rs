@@ -16,6 +16,7 @@ pub const CAPABILITIES: &[&str] = &[
     "records",
     "collections",
     "jobs",
+    "runs",
     "workspace",
     "clock",
     "completion",

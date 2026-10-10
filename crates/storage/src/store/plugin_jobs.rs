@@ -65,7 +65,7 @@ impl<D: Db> Store<D> {
         origin.user_action = false;
         Ok(origin)
     }
-    async fn job_plugin_enabled(
+    pub(super) async fn plugin_namespace_enabled(
         &self,
         user: UserId,
         context: &PluginExecutionContext,
@@ -119,7 +119,7 @@ impl<D: Db> Store<D> {
                         "Plugin does not declare this event".into(),
                     ));
                 }
-                if !self.job_plugin_enabled(user, context, plugin).await? {
+                if !self.plugin_namespace_enabled(user, context, plugin).await? {
                     return Err(StorageError::Conflict("Plugin is no longer enabled".into()));
                 }
                 let mut params = scope.clone();
@@ -279,7 +279,7 @@ impl<D: Db> Store<D> {
                 let user = UserId::new(row.get_int(10)?);
                 let prepared: PreparedPlugin = decode(row.get_text(11)?)?;
                 let context: PluginExecutionContext = decode(row.get_text(12)?)?;
-                if !store.job_plugin_enabled(user, &context, &prepared).await? { cursor = entry.id; continue; }
+                if !store.plugin_namespace_enabled(user, &context, &prepared).await? { cursor = entry.id; continue; }
                 prepared.validate().map_err(|error| StorageError::Db(error.to_string()))?;
                 entry.revision += 1;
                 entry.attempts += 1;
@@ -359,7 +359,7 @@ impl<D: Db> Store<D> {
             let row = rows.rows.first().ok_or_else(|| StorageError::Conflict("Job lease is no longer current".into()))?;
             let prepared: PreparedPlugin = decode(row.get_text(0)?)?;
             let mut context: PluginExecutionContext = decode(row.get_text(1)?)?;
-            if !store.job_plugin_enabled(user, &context, &prepared).await? { return Err(StorageError::Conflict("Plugin is no longer enabled".into())); }
+            if !store.plugin_namespace_enabled(user, &context, &prepared).await? { return Err(StorageError::Conflict("Plugin is no longer enabled".into())); }
             // Background callbacks cannot inherit a manual-editing override or chat authority.
             context.user_action = false;
             context.session_id = None;

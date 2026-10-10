@@ -9,6 +9,8 @@ for what's still ahead.
 
 ## [Unreleased]
 
+- Add capability-gated durable raw plugin prompt submissions with owned conversations, idempotency keys, bounded history, model pins and atomic queue delivery guards. Keep plugin prompts out of browser queue draining; host run dispatch and Scheduling remain in progress.
+
 - Deliver durable plugin events automatically through a shared worker with bounded concurrency, lease renewal during preparation/execution, sessionless grants and actor cancellation on lease loss. Run submission and executable Scheduling remain in progress.
 
 - Prevent plugin HTTP from bootstrapping bridge credentials or bypassing SDK grants through Open WebIDE control APIs, preserving ordinary public and LAN HTTP access.

@@ -4,6 +4,7 @@ pub mod execution;
 pub mod jobs;
 pub mod marketplace;
 pub mod records;
+pub mod runs;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::LazyLock};
 
 use regex::Regex;
@@ -246,13 +247,14 @@ impl PluginManifest {
                     .library
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                || rust.capabilities.len() > 7
+                || rust.capabilities.len() > 8
                 || rust.capabilities.iter().any(|name| {
                     ![
                         "http",
                         "records",
                         "collections",
                         "jobs",
+                        "runs",
                         "workspace",
                         "clock",
                         "completion",

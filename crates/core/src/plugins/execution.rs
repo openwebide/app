@@ -77,6 +77,13 @@ pub fn context_request_allowed(capability: &str, payload: &str) -> bool {
                     super::jobs::JobRequest::List { .. } | super::jobs::JobRequest::Read { .. }
                 )
         }),
+        "runs" => serde_json::from_str::<super::runs::RunRequest>(payload).is_ok_and(|request| {
+            request.validate().is_ok()
+                && matches!(
+                    request,
+                    super::runs::RunRequest::List { .. } | super::runs::RunRequest::Read { .. }
+                )
+        }),
         "records" | "collections" => serde_json::from_str::<super::records::RecordRequest>(payload)
             .is_ok_and(|request| {
                 request.validate().is_ok()
@@ -172,6 +179,21 @@ pub enum PluginStep {
 #[cfg(test)]
 mod context_job_tests {
     use super::context_request_allowed;
+    #[test]
+    fn planning_hooks_can_read_runs_but_cannot_submit_cancel_or_choose_a_scope() {
+        for request in [r#"{"action":"list"}"#, r#"{"action":"read","id":1}"#] {
+            assert!(context_request_allowed("runs", request));
+        }
+        for request in [
+            r#"{"action":"list","user_id":2}"#,
+            r#"{"action":"read","id":0}"#,
+            r#"{"action":"submit","key":"next","prompt":"x","target":{"kind":"origin"}}"#,
+            r#"{"action":"cancel","id":1,"revision":1}"#,
+            r#"{"action":"delete","id":1,"revision":1}"#,
+        ] {
+            assert!(!context_request_allowed("runs", request));
+        }
+    }
     #[test]
     fn planning_hooks_can_read_jobs_but_cannot_schedule_cancel_or_choose_a_scope() {
         for request in [r#"{"action":"list"}"#, r#"{"action":"read","id":1}"#] {

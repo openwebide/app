@@ -3132,6 +3132,7 @@ impl Backend for FakeBackend {
             self.queue_next_id.set(id);
             let prompt = openwebide_core::QueuedPrompt {
                 scheduled_task: None,
+                plugin_run: None,
                 id,
                 session_id: session,
                 revision: 1,

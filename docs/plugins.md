@@ -203,7 +203,20 @@ completion or lease replacement. Terminal jobs can be deleted to release quota
 and their idempotency keys. The bridge polls for due events and runs them through the shared execution
 workflow, renewing leases during compilation and execution. Delivery is at least
 once; plugin code must use stable keys and revision checks for repeatable effects.
-Run submission and the Scheduling policy migration remain unfinished.
+Run dispatch, completion delivery and the Scheduling policy migration remain unfinished.
+
+The prototype `runs` capability exposes durable raw prompt submissions through
+`list`, `read`, `submit`, `cancel` and terminal `delete`. Submissions use stable
+keys and owned conversations in the grant's project, including a job's retained
+origin conversation. A source may request a new conversation with its own title
+or select an existing owned conversation. Prompts are bounded to 32 KiB; history
+holds at most 1,000 runs and lists return up to 16 entries. Explicit or inherited
+models stay on the queued run rather than changing conversation settings.
+Plugin prompts are marked for host delivery and cannot be edited or drained by
+the browser's foreground queue. Removing one cancels its pending submission.
+Queue consumption and the user message commit together; consumed prompts cannot
+be replayed. Raw run dispatch and completion delivery are still being connected;
+these primitives do not complete the executable Scheduling migration.
 
 Skills collection writes accept a `draft` object using the existing skill schema.
 Reads include that draft and read-only `origin` metadata for managed plugin skills.
